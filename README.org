@@ -66,13 +66,20 @@ place after every edit.
 
 | Key                       | Action                                                          |
 |---------------------------+-----------------------------------------------------------------|
-| =TAB=                       | insert a *child* of the node at point                           |
+| =TAB=                       | insert a *child* of the node at point (right side at the root)   |
+| =C-u TAB=                   | on the *root*: insert a child on the *left* side                 |
 | =RET=                       | insert a *sibling* of the node at point (=org-return= off a node) |
 | =M-RET=                     | *edit* the text of the node at point                            |
-| =M-<left>= / =M-<right>=      | *promote* / *demote* the node (re-parent it; flips side at root) |
+| =M-<left>= / =M-<right>=      | *promote* / *demote* the node; on a root child, *flip* its side  |
 | =M-<up>= / =M-<down>=         | swap the node with its *previous* / *next* sibling              |
 | =C-c C-c=                   | run the block: re-align the body *and* (re)export the image      |
 | =M-x org-mindmap-delete-node= | delete the node at point and all its descendants                |
+
+The root node can branch *both ways*: =TAB= grows the right side, =C-u TAB=
+the left. A first-level branch's side is inherited by its whole subtree,
+so you only choose left/right once per top-level branch; =M-<left>= /
+=M-<right>= on a root child flips that branch (and its descendants) to the
+other side.
 
 These come from the bundled engine's =org-mindmap-mode= minor mode, which
 ox-mindmap turns on automatically in any buffer that contains a mindmap
