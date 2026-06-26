@@ -1,32 +1,68 @@
 #+TITLE: ox-mindmap
 
-Use [[https://github.com/wowhxj/org-mindmap][org-mindmap]] maps inside native Org Babel source blocks.
-
-* What is it
-=ox-mindmap= is a thin Org Babel backend that lets a mind map live in a
-=#+begin_src mindmap= block instead of org-mindmap's bespoke
-=#+begin_mindmap= block. This makes maps compose with the standard Babel
-machinery — =:exports=, =:eval=, =:results=, =:file=, =#+RESULTS=, =:var=,
-HTML/LaTeX export — for free.
+Edit a mind map as plain Unicode text, render it to a beautiful image —
+all inside a native Org Babel source block.
 
 #+begin_src
 ,#+begin_src mindmap :file map.svg :width 400
-« Root node » ┬─ child a
-              ╰─ child b
+              ╭─ hello
+« Root node » ┤
+              ╰─ 很好 ── 很坏
+,#+end_src
+
+,#+RESULTS:
+,#+begin_results
+[[file:map.svg]]
+,#+end_results
+#+end_src
+
+* The idea
+[[https://github.com/wowhxj/org-mindmap][org-mindmap]] is wonderful: a mind map is just text you edit in place, and
+the engine keeps it pretty. But it lives in a *bespoke* =#+begin_mindmap=
+block with its own =C-c C-c= handling and its own (hand-rolled) image and
+=#+RESULTS= logic.
+
+ox-mindmap reframes the same map as a *first-class Org Babel source
+block*:
+
+#+begin_src
+,#+begin_src mindmap :file map.svg
+...
 ,#+end_src
 #+end_src
 
-Press =C-c C-c= and ox-mindmap will:
-1. re-align the Unicode map in the block body *in place* (the body stays
-   the editable, human-friendly source of truth — "model A"), and
-2. render an image to =:file=,
+The moment a map becomes a real =src= block, it inherits the entire Org
+Babel ecosystem instead of reinventing pieces of it:
 
-while Org Babel inserts and maintains the =#+RESULTS= link.
+- =:file= — write the rendered image, with the link managed for you;
+- =:exports code | results | both | none= — control what appears on HTML/LaTeX export;
+- =:eval= — gate execution (e.g. =never-export=);
+- =:results= / =#+RESULTS= — standard, automatic result block;
+- =:var=, =:cache=, =:dir=, =:post=, tangling — all just work;
+- attribute injection (=#+CAPTION= / =#+ATTR_*=) — share the *same* setup
+  you already use for ditaa / plantuml / dot.
+
+In short: stop maintaining a parallel universe; let Org do what Org does.
+
+* How it works — "model A"
+The block body stays the *editable source of truth*: the human-friendly
+Unicode map, exactly as in org-mindmap. Pressing =C-c C-c= runs
+=org-babel-execute:mindmap=, which does two things:
+
+1. *re-aligns the map in the block body in place* (the equivalent of
+   org-mindmap's redraw), and
+2. *renders an image* to the =:file= target,
+
+then lets Org Babel insert and maintain the =#+RESULTS= link.
+
+So a single, familiar keystroke gives you both a tidy text map and a
+fresh picture — without leaving the =src= block.
 
 * Relationship to org-mindmap
-ox-mindmap is *only the Babel glue*. All the real work — parsing the map,
-computing the layout, drawing the SVG — is reused from the =org-mindmap=
-package, which ox-mindmap requires. Install both.
+ox-mindmap is intentionally *only the Babel glue layer*. Everything that
+makes the map — parsing the Unicode art, computing the layout, drawing
+the SVG — is reused from =org-mindmap=, which ox-mindmap requires. Install
+both:
 
 #+begin_src elisp
 (use-package org-mindmap
@@ -38,37 +74,35 @@ package, which ox-mindmap requires. Install both.
 #+end_src
 
 * Header arguments
-| Header        | Meaning                                                        |
-|---------------+----------------------------------------------------------------|
-| =:file=         | *required* — export target (=.svg= direct; =.png=/=.pdf= via tool)  |
-| =:width=        | image width, for attribute injection (see below)               |
-| =:layout=       | =top= or =centered= (passed to the renderer)                       |
-| =:max-width=    | soft word-wrap column limit, or =auto=                           |
-| =:compacted=    | =t= / =nil=                                                        |
-| =:paint-depth=  | depth from which to color subtrees                             |
-| =:wrap-leaves=  | wrap leaf nodes too                                            |
+| Header        | Meaning                                                       |
+|---------------+---------------------------------------------------------------|
+| =:file=         | *required* — export target (=.svg= direct; =.png=/=.pdf= via tool) |
+| =:width=        | image width, consumed by attribute injection (see below)      |
+| =:layout=       | =top= or =centered=                                               |
+| =:max-width=    | soft word-wrap column limit, or =auto=                          |
+| =:compacted=    | =t= / =nil=                                                       |
+| =:paint-depth=  | depth from which to color subtrees                            |
+| =:wrap-leaves=  | wrap leaf nodes too                                           |
 
-Defaults (=org-babel-default-header-args:mindmap=): =:results file link
-replace :exports results :wrap results=.
+Defaults (=org-babel-default-header-args:mindmap=):
+=:results file link replace :exports results :wrap results=.
 
-For =.png=/=.pdf= output you need one of =rsvg-convert=, =magick=, =convert= or
-=inkscape= on =exec-path=; otherwise a sibling =.svg= is written.
+For =.png= / =.pdf= output you need one of =rsvg-convert=, =magick=, =convert= or
+=inkscape= on =exec-path=; otherwise a sibling =.svg= is written and you are
+told about it. =.svg= itself needs no external tools.
 
 * Image attributes (=:width= → =#+ATTR_*=)
 ox-mindmap deliberately does *not* emit =#+CAPTION= / =#+ATTR_ORG/LATEX/HTML=
 lines itself. Instead it exposes =:width= as a normal header argument and
-lands the result in a =#+begin_results= drawer, so the *same*
-attribute-injection setup you use for other graphics languages (ditaa,
-plantuml, dot, ...) can handle mind maps too.
-
-If you use the common advice-based approach, just add ="mindmap"= to the
-language list:
+lands the result inside a =#+begin_results= drawer — so the *same*
+attribute-injection setup you already use for other graphics languages
+can style mind maps too. Just add ="mindmap"= to the language list:
 
 #+begin_src elisp
 (defun insert-attr-decls-at-results (&rest _)
   (when (member (car (org-babel-get-src-block-info))
                 '("ditaa" "plantuml" "dot" "mermaid" "d2" "mindmap"))
-    ;; ... read :width, insert #+CAPTION / #+ATTR_* after #+begin_results ...
+    ;; read :width, insert #+CAPTION / #+ATTR_* after #+begin_results ...
     ))
 (advice-add 'org-babel-execute-src-block :after #'insert-attr-decls-at-results)
 #+end_src
@@ -82,10 +116,17 @@ or as an =org-babel-after-execute-hook=.)
   leave the body untouched.
 
 * Status
-Early prototype. The render engine is the proven org-mindmap one; the
-Babel layer is new. The remaining open area is the in-block *editing* UX
-(TAB / RET / =M-<arrows>=) inside =src= blocks, which Org binds for its own
+Early but working. The render engine is the proven org-mindmap one; the
+Babel layer is new. The main open area is the in-block *editing* UX
+(=TAB= / =RET= / =M-<arrows>=) inside =src= blocks, which Org binds for its own
 purposes.
 
+* Acknowledgements
+This project stands on the shoulders of [[https://github.com/krvkir/org-mindmap][org-mindmap]] by *krvkir*. The
+beautiful, fast, text-first mind map engine — the parser, the layout, the
+rendering — is entirely their work; ox-mindmap merely re-homes it inside
+Org Babel. Heartfelt thanks to krvkir for creating and sharing the
+original implementation that this idea evolved from. 🙏
+
 * License
-GPL-3.0-or-later. See [[file:LICENSE]].
+GPL-3.0-or-later, the same license as org-mindmap. See [[file:LICENSE]].
