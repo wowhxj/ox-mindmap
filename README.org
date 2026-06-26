@@ -58,20 +58,28 @@ then lets Org Babel insert and maintain the =#+RESULTS= link.
 So a single, familiar keystroke gives you both a tidy text map and a
 fresh picture — without leaving the =src= block.
 
-* Relationship to org-mindmap
-ox-mindmap is intentionally *only the Babel glue layer*. Everything that
-makes the map — parsing the Unicode art, computing the layout, drawing
-the SVG — is reused from =org-mindmap=, which ox-mindmap requires. Install
-both:
+* Installation — self-contained, no dependencies
+ox-mindmap *bundles* the org-mindmap engine (the =org-mindmap*.el= files in
+this repository), so it is fully self-contained: install this one package
+and nothing else.
 
 #+begin_src elisp
-(use-package org-mindmap
-  :vc (:url "https://github.com/wowhxj/org-mindmap"))
-
 (use-package ox-mindmap
   :vc (:url "https://github.com/wowhxj/ox-mindmap")
-  :after (org-mindmap ob))
+  :after ob)
 #+end_src
+
+The map engine — parsing the Unicode art, computing the layout, drawing
+the SVG, plus the in-place structural-editing commands and
+=org-mindmap-mode= — all comes along, since the engine files are part of
+this package. ox-mindmap's own code is just the thin Org Babel glue on
+top.
+
+#+begin_quote
+*Heads-up:* the bundled engine still provides the =org-mindmap= feature.
+Do *not* also install the standalone [[https://github.com/krvkir/org-mindmap][org-mindmap]] package next to
+ox-mindmap, or the two copies will clash. Use one or the other.
+#+end_quote
 
 * Header arguments
 | Header        | Meaning                                                       |
@@ -124,9 +132,10 @@ purposes.
 * Acknowledgements
 This project stands on the shoulders of [[https://github.com/krvkir/org-mindmap][org-mindmap]] by *krvkir*. The
 beautiful, fast, text-first mind map engine — the parser, the layout, the
-rendering — is entirely their work; ox-mindmap merely re-homes it inside
-Org Babel. Heartfelt thanks to krvkir for creating and sharing the
-original implementation that this idea evolved from. 🙏
+rendering — is entirely their work, and is *bundled here verbatim* (with
+their copyright headers intact) under the same GPL. ox-mindmap merely
+re-homes it inside Org Babel. Heartfelt thanks to krvkir for creating and
+sharing the original implementation that this idea evolved from. 🙏
 
 * License
 GPL-3.0-or-later, the same license as org-mindmap. See [[file:LICENSE]].

@@ -6,7 +6,7 @@
 ;; Maintainer: Randolph HUANG
 ;; URL: https://github.com/wowhxj/ox-mindmap
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (org-mindmap "0.3"))
+;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: outlines, hypermedia, convenience, org
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -43,8 +43,14 @@
 ;; while Org Babel inserts and maintains the `#+RESULTS' link.
 ;;
 ;; The heavy lifting -- parsing the map, computing the layout, drawing the
-;; SVG -- is reused from the `org-mindmap' package, which ox-mindmap
-;; requires.  ox-mindmap itself is only the thin Babel glue layer.
+;; SVG -- is done by the org-mindmap engine, originally by krvkir
+;; (https://github.com/krvkir/org-mindmap).  That engine is BUNDLED with
+;; ox-mindmap (the `org-mindmap*.el' files in this package), so ox-mindmap
+;; is fully self-contained and has no external package dependency.
+;;
+;; NOTE: the bundled engine still `provide's the `org-mindmap' feature.  Do
+;; not also install the standalone org-mindmap package alongside ox-mindmap,
+;; or the two copies will collide.  Use one or the other.
 ;;
 ;; Image attributes (`#+CAPTION', `#+ATTR_ORG/LATEX/HTML') are intentionally
 ;; NOT generated here: `:width' is exposed as a standard header argument so
