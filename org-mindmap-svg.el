@@ -48,6 +48,26 @@
   :type 'number
   :group 'org-mindmap-svg)
 
+(defcustom org-mindmap-svg-box-vgap 6
+  "Vertical gap (px) carved out between vertically adjacent node boxes.
+The text engine packs sibling rows tightly, which makes the SVG node
+borders touch.  Each box is shrunk by half this amount top and bottom so
+neighbours keep some breathing room.  Node text and connectors are left
+where they are (centred), so only the visible border moves."
+  :type 'number
+  :group 'org-mindmap-svg)
+
+(defcustom org-mindmap-svg-palette
+  '("#4e79a7" "#f28e2b" "#59a14f" "#e15759" "#b07aa1"
+    "#76b7b2" "#edc948" "#ff9da7" "#9c755f" "#af7aa1")
+  "Branch colour palette for the SVG export (a Tableau-10-style set).
+Each first-level branch is given the next colour in turn and its whole
+subtree inherits it, so the picture stays legible and theme-independent.
+Set to nil to fall back to `org-mindmap-color-palette-fn' instead."
+  :type '(choice (const :tag "Use theme palette" nil)
+                 (repeat string))
+  :group 'org-mindmap-svg)
+
 (defcustom org-mindmap-svg-font-family "sans-serif"
   "Font family used for node text in the SVG."
   :type 'string
@@ -89,37 +109,61 @@ the argument list (program first).  The first executable found on
 ;; Color helpers
 ;;
 
+(defun org-mindmap-svg--rgb (color)
+  "Return COLOR as an (R G B) list of 0..1 floats.
+A `#rrggbb' string is parsed directly; anything else (named colors like
+\"white\") falls back to `color-name-to-rgb'.  Parsing hex ourselves keeps
+the result lossless and display-independent, so colors survive headless
+or TTY export instead of being snapped to the nearest terminal color."
+  (or (and (stringp color)
+           (string-match
+            "\\`#\\([0-9a-fA-F]\\{2\\}\\)\\([0-9a-fA-F]\\{2\\}\\)\\([0-9a-fA-F]\\{2\\}\\)\\'"
+            color)
+           (list (/ (string-to-number (match-string 1 color) 16) 255.0)
+                 (/ (string-to-number (match-string 2 color) 16) 255.0)
+                 (/ (string-to-number (match-string 3 color) 16) 255.0)))
+      (and color (color-name-to-rgb color))))
+
 (defun org-mindmap-svg--hex (color)
   "Return COLOR as a #rrggbb hex string, or the neutral color if unknown."
-  (let ((rgb (and color (color-name-to-rgb color))))
+  (let ((rgb (org-mindmap-svg--rgb color)))
     (if rgb
         (apply #'org-mindmap--color-rgb-to-hex (append rgb '(2)))
-      (or (and (color-name-to-rgb org-mindmap-svg-neutral-color)
+      (or (and (org-mindmap-svg--rgb org-mindmap-svg-neutral-color)
                org-mindmap-svg-neutral-color)
           "#5b6b7a"))))
 
 (defun org-mindmap-svg--blend (color other alpha)
   "Blend COLOR with OTHER by ALPHA (COLOR weight), returning a hex string."
-  (let ((a (color-name-to-rgb (or color org-mindmap-svg-neutral-color)))
-        (b (color-name-to-rgb other)))
+  (let ((a (org-mindmap-svg--rgb (or color org-mindmap-svg-neutral-color)))
+        (b (org-mindmap-svg--rgb other)))
     (apply #'org-mindmap--color-rgb-to-hex
            (append (org-mindmap--color-blend a b alpha) '(2)))))
 
-(defun org-mindmap-svg--assign-colors (node props color table)
-  "Fill TABLE mapping each node under NODE to its color.
-Mirrors the paint-depth propagation used by the text renderer.  COLOR is
-the inherited color (nil for the root); PROPS holds :paint-depth."
+(defun org-mindmap-svg--assign-colors (node props color table &optional counter)
+  "Fill TABLE mapping each node under NODE to its branch color.
+Coloring is deterministic and structural: a node sitting at the
+`:paint-depth' boundary opens a new branch whose color is the next entry
+of `org-mindmap-color-palette', taken in order and shared across both
+sides (so sibling branches never collide and left/right stay in step);
+every descendant inherits that branch color.  COLOR is the inherited
+color (nil = the neutral root); COUNTER is an internal one-element list
+holding the next palette index."
+  (setq counter (or counter (list 0)))
   (puthash node color table)
-  (let ((depth (or (org-mindmap-parser-node-depth node) 0))
-        (paint-depth (plist-get props :paint-depth)))
+  (let* ((depth (or (org-mindmap-parser-node-depth node) 0))
+         (paint-depth (plist-get props :paint-depth))
+         (palette org-mindmap-color-palette)
+         (at-boundary (and paint-depth palette (= depth paint-depth))))
     (dolist (side '(left right))
-      (let ((children (org-mindmap--side-children node side)))
-        (cl-loop for child in children
-                 for i from 0
-                 do (let ((child-color (if (and paint-depth (= depth paint-depth))
-                                           (funcall org-mindmap-color-assign-fn child i)
-                                         color)))
-                      (org-mindmap-svg--assign-colors child props child-color table)))))))
+      (dolist (child (org-mindmap--side-children node side))
+        (let ((child-color
+               (if at-boundary
+                   (let ((idx (car counter)))
+                     (setcar counter (1+ idx))
+                     (nth (mod idx (length palette)) palette))
+                 color)))
+          (org-mindmap-svg--assign-colors child props child-color table counter))))))
 
 ;;
 ;; Geometry & text helpers
@@ -179,10 +223,15 @@ COLOR-TABLE maps nodes to inherited colors."
          (fill (org-mindmap-svg--blend color "white" 0.12))
          (text-color (org-mindmap-svg--blend color "black" 0.7))
          (lines (org-mindmap-svg--node-text-lines node props))
-         (r org-mindmap-svg-node-radius))
+         (r org-mindmap-svg-node-radius)
+         ;; Shrink the box vertically so tightly-stacked siblings keep a
+         ;; visible gap; text and connectors stay on the original centre.
+         (vpad (min (/ org-mindmap-svg-box-vgap 2.0) (/ h 3.0)))
+         (ry (+ y vpad))
+         (rh (- h (* 2 vpad))))
     (with-current-buffer out
       (insert (format "  <rect x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" rx=\"%s\" ry=\"%s\" fill=\"%s\" stroke=\"%s\" stroke-width=\"%s\"/>\n"
-                      x y w h r r fill stroke org-mindmap-svg-stroke-width))
+                      x ry w rh r r fill stroke org-mindmap-svg-stroke-width))
       (cl-loop for line in lines
                for i from 0
                do (let ((ty (+ y (* (+ i 0.5) org-mindmap-svg-cell-height)
@@ -226,8 +275,10 @@ COLOR-TABLE maps nodes to inherited colors."
   "Return an SVG string rendering ROOTS, using map PROPS."
   (when roots
     (org-mindmap-build-tree-layout roots props)
-    (let* ((org-mindmap-color-palette (funcall org-mindmap-color-palette-fn))
+    (let* ((org-mindmap-color-palette (or org-mindmap-svg-palette
+                                           (funcall org-mindmap-color-palette-fn)))
            (color-table (make-hash-table :test 'eq))
+           (color-counter (list 0))
            (all-nodes (cl-loop for root in roots append (org-mindmap--subtree root)))
            (cw org-mindmap-svg-cell-width)
            (ch org-mindmap-svg-cell-height)
@@ -242,7 +293,7 @@ COLOR-TABLE maps nodes to inherited colors."
            (height (+ max-y (* 2 m))))
       (ignore cw ch)
       (dolist (root roots)
-        (org-mindmap-svg--assign-colors root props nil color-table))
+        (org-mindmap-svg--assign-colors root props nil color-table color-counter))
       (with-temp-buffer
         (insert (format "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"))
         (insert (format "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%s\" height=\"%s\" viewBox=\"0 0 %s %s\">\n"
