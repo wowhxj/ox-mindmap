@@ -58,6 +58,36 @@ then lets Org Babel insert and maintain the =#+RESULTS= link.
 So a single, familiar keystroke gives you both a tidy text map and a
 fresh picture — without leaving the =src= block.
 
+* Editing the map interactively
+You do *not* have to draw the Unicode connectors by hand. The whole
+org-mindmap canvas editor works *inside* the =#+begin_src mindmap= block:
+put point on a node and use the keys below — the map redraws itself in
+place after every edit.
+
+| Key                       | Action                                                          |
+|---------------------------+-----------------------------------------------------------------|
+| =TAB=                       | insert a *child* of the node at point                           |
+| =RET=                       | insert a *sibling* of the node at point (=org-return= off a node) |
+| =M-RET=                     | *edit* the text of the node at point                            |
+| =M-<left>= / =M-<right>=      | *promote* / *demote* the node (re-parent it; flips side at root) |
+| =M-<up>= / =M-<down>=         | swap the node with its *previous* / *next* sibling              |
+| =C-c C-c=                   | run the block: re-align the body *and* (re)export the image      |
+| =M-x org-mindmap-delete-node= | delete the node at point and all its descendants                |
+
+These come from the bundled engine's =org-mindmap-mode= minor mode, which
+ox-mindmap turns on automatically in any buffer that contains a mindmap
+block (look for =⅄= in the mode line). Everywhere outside a mindmap block
+the keys keep their normal Org meaning — =TAB= cycles, =RET= inserts a
+newline, =M-<arrows>= act on Org structure — so the editor stays inert
+until point is actually on a map.
+
+=C-c C-c= is deliberately handed to Org Babel (=org-babel-execute:mindmap=)
+rather than the engine's own redraw, so re-align, image export and the
+=#+RESULTS= link all stay in sync (see "How it works" above).
+
+This behaviour is controlled by =ox-mindmap-interactive= (default =t=); set
+it to =nil= to disable the in-block editor and keep only =C-c C-c=.
+
 * Installation — self-contained, no dependencies
 ox-mindmap *bundles* the org-mindmap engine (the =org-mindmap*.el= files in
 this repository), so it is fully self-contained: install this one package
@@ -122,12 +152,16 @@ or as an =org-babel-after-execute-hook=.)
 - =ox-mindmap-realign= (default =t=): when non-nil, executing a block
   re-aligns its body in place. Set to =nil= to only export the image and
   leave the body untouched.
+- =ox-mindmap-interactive= (default =t=): when non-nil, the org-mindmap
+  canvas editor (=TAB= / =RET= / =M-RET= / =M-<arrows>=) is active inside
+  =#+begin_src mindmap= blocks. Set to =nil= to keep only =C-c C-c=. See
+  [[*Editing the map interactively][Editing the map interactively]].
 
 * Status
-Early but working. The render engine is the proven org-mindmap one; the
-Babel layer is new. The main open area is the in-block *editing* UX
-(=TAB= / =RET= / =M-<arrows>=) inside =src= blocks, which Org binds for its own
-purposes.
+Working. The render engine is the proven org-mindmap one; the Babel layer
+and the in-block editing bridge are ox-mindmap's own. =TAB= / =RET= /
+=M-<arrows>= now drive the engine's structural editing inside =src= blocks,
+with =C-c C-c= reserved for Org Babel's execute/export.
 
 * Acknowledgements
 This project stands on the shoulders of [[https://github.com/krvkir/org-mindmap][org-mindmap]] by *krvkir*. The
