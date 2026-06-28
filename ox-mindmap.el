@@ -145,6 +145,11 @@ nil; the file link is inserted by Org Babel."
       (when ox-mindmap-realign
         (ox-mindmap--realign-body roots props))
       (org-mindmap-svg-export-to-file file roots props)
+      ;; A block freshly typed into an already-open buffer never re-ran
+      ;; `org-mode-hook', so the canvas editor may still be off here; turn
+      ;; it on now that we have confirmed a real mindmap block exists.
+      (when (and ox-mindmap-interactive (not (bound-and-true-p org-mindmap-mode)))
+        (ox-mindmap--maybe-enable))
       nil)))
 
 ;;;###autoload

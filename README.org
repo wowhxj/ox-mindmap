@@ -163,12 +163,18 @@ or as an =org-babel-after-execute-hook=.)
   canvas editor (=TAB= / =RET= / =M-RET= / =M-<arrows>=) is active inside
   =#+begin_src mindmap= blocks. Set to =nil= to keep only =C-c C-c=. See
   [[*Editing the map interactively][Editing the map interactively]].
-- =org-mindmap-svg-palette= (default a Tableau-10-style set): the branch
+- =org-mindmap-svg-palette= (default a 7-color rainbow set): the branch
   colors for the SVG. Each first-level branch takes the next color in
-  order and its whole subtree inherits it; the root stays neutral
+  order (cycling if there are more branches than colors) and its whole
+  subtree inherits it; the root stays neutral
   (=org-mindmap-svg-neutral-color=). Set to =nil= to derive colors from the
   theme via =org-mindmap-color-palette-fn= instead. Which level starts a
   new color is still governed by the =:paint-depth= header (default =0=).
+- =org-mindmap-svg-depth-fade= (default =0.16=): each level inside a branch
+  keeps the branch hue but is blended this fraction further toward white,
+  so a subtree fades from a saturated root to pale leaves instead of being
+  one flat color (more visual variety even with few branches). Set to =0=
+  for flat per-branch coloring.
 - =org-mindmap-svg-box-vgap= (default =6=): pixels of vertical breathing
   room carved out between tightly-stacked node boxes so their borders do
   not touch. Text and connectors stay centered.

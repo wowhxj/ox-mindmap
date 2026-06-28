@@ -19,6 +19,16 @@
 ;; `org-mindmap' requires us back, so avoid a hard `require' loop here; the
 ;; layout/box/color helpers we use all live in org-mindmap.el and are loaded
 ;; by the time export runs.
+;;
+;; Mark the dynamic vars we rebind below as special *for the byte-compiler*.
+;; Without these forward declarations, compiling this file without
+;; org-mindmap.el loaded would turn the `let' on `org-mindmap-color-palette'
+;; in `org-mindmap-svg-string' into a lexical binding that `assign-colors'
+;; (which reads the dynamic value) could not see -- silently falling back to
+;; the engine's default palette.  Valueless defvars do not clobber the real
+;; definitions in org-mindmap.el.
+(defvar org-mindmap-color-palette)
+(defvar org-mindmap-color-palette-fn)
 
 ;;
 ;; Customization
@@ -58,12 +68,12 @@ where they are (centred), so only the visible border moves."
   :group 'org-mindmap-svg)
 
 (defcustom org-mindmap-svg-palette
-  '("#4e79a7" "#f28e2b" "#59a14f" "#e15759" "#b07aa1"
-    "#76b7b2" "#edc948" "#ff9da7" "#9c755f" "#af7aa1")
-  "Branch colour palette for the SVG export (a Tableau-10-style set).
-Each first-level branch is given the next colour in turn and its whole
-subtree inherits it, so the picture stays legible and theme-independent.
-Set to nil to fall back to `org-mindmap-color-palette-fn' instead."
+  '("#e6194b" "#f58231" "#f5c518" "#3cb44b" "#4363d8" "#4b2bb5" "#911eb4")
+  "Branch colour palette for the SVG export (a 7-colour rainbow set).
+Each first-level branch is given the next colour in turn (cycling when
+there are more branches than colours) and its whole subtree inherits it,
+so the picture stays legible and theme-independent.  Set to nil to fall
+back to `org-mindmap-color-palette-fn' instead."
   :type '(choice (const :tag "Use theme palette" nil)
                  (repeat string))
   :group 'org-mindmap-svg)
@@ -91,6 +101,14 @@ Set to nil to fall back to `org-mindmap-color-palette-fn' instead."
 (defcustom org-mindmap-svg-neutral-color "#5b6b7a"
   "Color used for unpainted nodes (e.g. the root)."
   :type 'string
+  :group 'org-mindmap-svg)
+
+(defcustom org-mindmap-svg-depth-fade 0.16
+  "How much each level lightens its parent's branch color (0 disables).
+A branch keeps one hue, but every deeper level is blended this fraction
+further toward white, so a subtree fades from a saturated root to pale
+leaves instead of being one flat color.  Set to 0 for the old behaviour."
+  :type 'number
   :group 'org-mindmap-svg)
 
 (defcustom org-mindmap-svg-converters
@@ -158,11 +176,17 @@ holding the next palette index."
     (dolist (side '(left right))
       (dolist (child (org-mindmap--side-children node side))
         (let ((child-color
-               (if at-boundary
-                   (let ((idx (car counter)))
-                     (setcar counter (1+ idx))
-                     (nth (mod idx (length palette)) palette))
-                 color)))
+               (cond
+                (at-boundary
+                 (let ((idx (car counter)))
+                   (setcar counter (1+ idx))
+                   (nth (mod idx (length palette)) palette)))
+                ;; Inside a branch: keep the hue but fade a step lighter
+                ;; each level, so a subtree is shaded rather than flat.
+                ((and color (> org-mindmap-svg-depth-fade 0))
+                 (org-mindmap-svg--blend color "white"
+                                         org-mindmap-svg-depth-fade))
+                (t color))))
           (org-mindmap-svg--assign-colors child props child-color table counter))))))
 
 ;;
