@@ -102,6 +102,19 @@ SVG: =*bold*=, =/italic/=, =_underline_=, =+strike+=, =~code~= / ==verbatim==
 in a link colour; a bare =[[target]]= shows the target). A markup token that
 gets split across lines by wrapping is left literal.
 
+Line-level Org syntax is rendered too:
+- a =*= / =**= /… heading line becomes a *bold, enlarged* line (bigger the
+  shallower the level);
+- a =-= or =+= list item is shown with a =•= bullet;
+- a rule line (=-----=, five or more dashes) becomes a full-width divider.
+
+* Multi-line nodes
+A node can hold several lines. Insert an in-node line break with
+=S-<return>= while editing a node (=M-RET=, or when typing a new node); the
+minibuffer shows real newlines and the break is stored as Org's =\\=
+marker. Blank lines are kept, so you can group lines visually. Multi-line
+nodes are *left-aligned*; single-line nodes stay centered.
+
 * Installation — self-contained, no dependencies
 ox-mindmap *bundles* the org-mindmap engine (the =org-mindmap*.el= files in
 this repository), so it is fully self-contained: install this one package

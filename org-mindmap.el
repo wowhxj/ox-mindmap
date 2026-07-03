@@ -351,8 +351,16 @@ If START is non-nil, pad at the beginning; otherwise at the end."
        (t (push line acc))))
     (nreverse acc)))
 
+(defconst org-mindmap-line-break "\\\\"
+  "Marker for an in-node hard line break (two backslashes, as in Org).
+It is stored literally in the node text and on the canvas, so it survives
+parsing; display and SVG split on it and strip it.")
+
 (defun org-mindmap--node-display-lines (node props)
-  "Return display lines for NODE respecting :max-width and :wrap-leaves PROPS."
+  "Return display lines for NODE respecting :max-width and :wrap-leaves PROPS.
+In-node hard breaks (the `org-mindmap-line-break' marker) split the text
+into stacked lines; the marker is re-appended so it survives the canvas
+round-trip (it is a literal cell that reparsing recovers)."
   (let* ((text (org-mindmap-parser-node-text node))
          (side (org-mindmap-parser-node-side node))
          (is-leaf (not (org-mindmap-parser-node-children node)))
@@ -360,14 +368,30 @@ If START is non-nil, pad at the beginning; otherwise at the end."
          (leaves-mult (if (numberp wrap-leaves) wrap-leaves 1))
          (max-width (plist-get props :max-width))
          (target-width (and max-width (floor (* (if is-leaf leaves-mult 1) max-width))))
-         (lines (if (and max-width
-                         (or wrap-leaves (not is-leaf))
-                         (> (string-width text) target-width))
-                    (string-split (string-fill text target-width) "\n")
-                  (list text)))
-         (lines-wo-short-words (org-mindmap--join-short-lines lines))
-         (node-box-width (apply #'max (mapcar #'string-width lines-wo-short-words)))
-         (padded-lines (mapcar #'(lambda (l) (org-mindmap--string-pad-width l node-box-width nil (eq side 'left))) lines-wo-short-words)))
+         (segments (split-string text (regexp-quote org-mindmap-line-break)))
+         (nseg (length segments))
+         (lines
+          (cl-loop for seg in segments
+                   for si from 1
+                   for seg* = (string-trim seg)
+                   for sub = (if (string-empty-p seg*)
+                                 ;; keep blank lines; a marker-only row below
+                                 ;; makes it a real (non-empty) canvas cell
+                                 (list "")
+                               (org-mindmap--join-short-lines
+                                (if (and max-width
+                                         (or wrap-leaves (not is-leaf))
+                                         (> (string-width seg*) target-width))
+                                    (string-split (string-fill seg* target-width) "\n")
+                                  (list seg*))))
+                   append (if (< si nseg)
+                              ;; re-append the marker to this segment's last line
+                              (append (butlast sub)
+                                      (list (concat (car (last sub))
+                                                    org-mindmap-line-break)))
+                            sub)))
+         (node-box-width (apply #'max (mapcar #'string-width lines)))
+         (padded-lines (mapcar #'(lambda (l) (org-mindmap--string-pad-width l node-box-width nil (eq side 'left))) lines)))
     ;; IDEA Put lines both below and above the connector row.
     (if (null (org-mindmap-parser-node-parent node))
         ;; ... append delimiters to the first line of the root node
@@ -1007,6 +1031,29 @@ Uses PROPS for rendering."
   (cl-destructuring-bind (_start _end _props _roots target-node) (org-mindmap--get-state)
     target-node))
 
+(defvar org-mindmap-read-node-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map minibuffer-local-map)
+    (define-key map (kbd "S-<return>")
+                (lambda () (interactive) (insert "\n")))
+    map)
+  "Minibuffer keymap for node text: `S-<return>' inserts an in-node break.")
+
+(defun org-mindmap--read-node-text (prompt &optional text point-offset)
+  "Read node text with PROMPT, allowing `S-<return>' for an in-node break.
+Stored `org-mindmap-line-break' markers show as real newlines while
+editing and are restored on return.  TEXT is the initial content."
+  (let* ((init (replace-regexp-in-string
+                ;; eat the space the reparse round-trip leaves after a marker
+                (concat (regexp-quote org-mindmap-line-break) " *")
+                "\n" (or text "")))
+         (input (read-from-minibuffer
+                 prompt (cons init (when point-offset (1+ point-offset)))
+                 org-mindmap-read-node-map)))
+    ;; LITERAL=t: the marker contains backslashes, which the replacement
+    ;; syntax would otherwise eat (turning "\\\\" into "\\").
+    (replace-regexp-in-string "\n" org-mindmap-line-break input nil t)))
+
 (defun org-mindmap-edit-node ()
   "Edit the text of the node at point and refresh the mindmap."
   (interactive)
@@ -1014,7 +1061,7 @@ Uses PROPS for rendering."
     (unless target-node (error "No node at point"))
     (let* ((point-offset (org-mindmap-parser-node-point-offset target-node))
            (text (org-mindmap-parser-node-text target-node))
-           (new-text (read-string "Edit node: " (cons text (when point-offset (1+ point-offset))))))
+           (new-text (org-mindmap--read-node-text "Edit node: " text point-offset)))
       (setf (org-mindmap-parser-node-text target-node) new-text)
       (org-mindmap--update-buffer start end roots target-node props))))
 
@@ -1031,7 +1078,7 @@ Uses PROPS for rendering."
   "Create new child node with optional TEXT under node at cursor position.
 If TEXT is nil or empty, creates an empty node for immediate editing.
 With prefix argument at root node, creates a child on the left side."
-  (interactive (list (read-string "Child text: ")))
+  (interactive (list (org-mindmap--read-node-text "Child text: ")))
   (setq text (or text ""))
   (cl-destructuring-bind (start end props roots target-node) (org-mindmap--get-state)
     (unless target-node (error "No node at point"))
@@ -1051,7 +1098,7 @@ With prefix argument at root node, creates a child on the left side."
   "Create new sibling node with optional TEXT after node at cursor position.
 If TEXT is nil or empty, creates an empty node for immediate editing.
 If target-node is the root node, it calls `org-mindmap-insert-child`."
-  (interactive (list (read-string "Sibling text: ")))
+  (interactive (list (org-mindmap--read-node-text "Sibling text: ")))
   (setq text (or text ""))
   (cl-destructuring-bind (start end props roots target-node) (org-mindmap--get-state)
     (unless target-node (error "No node at point"))
@@ -1074,7 +1121,7 @@ If target-node is the root node, it calls `org-mindmap-insert-child`."
   "Create new root node with optional TEXT at end of existing roots.
 If TEXT is nil or empty, creates an empty node for immediate editing.
 In the single-root model, this is only allowed if no root exists."
-  (interactive (list (read-string "Root text: ")))
+  (interactive (list (org-mindmap--read-node-text "Root text: ")))
   (setq text (or text ""))
   (cl-destructuring-bind (start end props roots _target-node) (org-mindmap--get-state)
     (if (and roots (> (length roots) 0))

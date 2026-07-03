@@ -175,18 +175,14 @@ holding the next palette index."
          (at-boundary (and paint-depth palette (= depth paint-depth))))
     (dolist (side '(left right))
       (dolist (child (org-mindmap--side-children node side))
+        ;; Store the *base* branch color; the per-depth fade is applied at
+        ;; render time to the fill only, so borders and text stay legible.
         (let ((child-color
-               (cond
-                (at-boundary
-                 (let ((idx (car counter)))
-                   (setcar counter (1+ idx))
-                   (nth (mod idx (length palette)) palette)))
-                ;; Inside a branch: keep the hue but fade a step lighter
-                ;; each level, so a subtree is shaded rather than flat.
-                ((and color (> org-mindmap-svg-depth-fade 0))
-                 (org-mindmap-svg--blend color "white"
-                                         org-mindmap-svg-depth-fade))
-                (t color))))
+               (if at-boundary
+                   (let ((idx (car counter)))
+                     (setcar counter (1+ idx))
+                     (nth (mod idx (length palette)) palette))
+                 color)))
           (org-mindmap-svg--assign-colors child props child-color table counter))))))
 
 ;;
@@ -212,10 +208,17 @@ holding the next palette index."
                                                 (string-to-list (cdr pair))))
                                       org-mindmap-parser-root-delimiters)))))
     (mapcar (lambda (line)
-              (string-trim
-               (apply #'string
-                      (cl-remove-if (lambda (c) (memq c delim-chars))
-                                    (string-to-list line)))))
+              (let ((clean (string-trim
+                            (apply #'string
+                                   (cl-remove-if (lambda (c) (memq c delim-chars))
+                                                 (string-to-list line))))))
+                ;; Drop the trailing in-node line-break marker (the split
+                ;; into separate lines already happened at display-lines).
+                (string-trim
+                 (if (string-suffix-p org-mindmap-line-break clean)
+                     (substring clean 0 (- (length clean)
+                                           (length org-mindmap-line-break)))
+                   clean))))
             lines)))
 
 (defconst org-mindmap-svg--link-re
@@ -238,7 +241,19 @@ holding the next palette index."
 (defun org-mindmap-svg--markup-runs (line)
   "Split LINE into (TEXT . ATTRS) runs, parsing org links and emphasis.
 ATTRS is a tspan attribute plist (nil for plain text).  A markup token
-that is not closed within LINE (e.g. split by wrapping) is left literal."
+that is not closed within LINE (e.g. split by wrapping) is left literal.
+A leading-`*' Org heading line renders as a single bold run."
+  (if (string-match "\\`\\(\\*+\\)[ \t]+\\(.*\\)\\'" line)
+      ;; heading: bold and enlarged, shrinking one step per nesting level
+      (let* ((level (length (match-string 1 line)))
+             (size (round (* org-mindmap-svg-font-size
+                             (max 1.0 (- 1.5 (* 0.15 (1- level))))))))
+        (list (cons (match-string 2 line)
+                    (list :font-weight "bold" :font-size size))))
+    (org-mindmap-svg--markup-runs-1 line)))
+
+(defun org-mindmap-svg--markup-runs-1 (line)
+  "Tokenize LINE into runs by Org links and inline emphasis (no heading rule)."
   (let ((runs '()) (i 0) (n (length line)))
     (while (< i n)
       (let ((lpos (string-match org-mindmap-svg--link-re line i))
@@ -301,8 +316,18 @@ COLOR-TABLE maps nodes to inherited colors."
          (x (plist-get g :x)) (y (plist-get g :y))
          (w (plist-get g :w)) (h (plist-get g :h))
          (color (or (gethash node color-table) org-mindmap-svg-neutral-color))
-         (stroke (org-mindmap-svg--hex color))
-         (fill (org-mindmap-svg--blend color "white" 0.12))
+         ;; Depth fade lightens the *fill* only; a deeper subtree looks
+         ;; paler while its border and text keep the branch color and stay
+         ;; readable (`steps' = levels below the branch head).
+         (depth (or (org-mindmap-parser-node-depth node) 0))
+         (paint-depth (or (plist-get props :paint-depth) 0))
+         (steps (max 0 (- depth paint-depth 1)))
+         (fade (min 0.7 (* steps org-mindmap-svg-depth-fade)))
+         (faded (org-mindmap-svg--blend color "white" (- 1.0 fade)))
+         ;; keep a hint of the gradient on the border but never invisible
+         (stroke (org-mindmap-svg--hex
+                  (org-mindmap-svg--blend color "white" (- 1.0 (min 0.3 fade)))))
+         (fill (org-mindmap-svg--blend faded "white" 0.12))
          (text-color (org-mindmap-svg--blend color "black" 0.7))
          (lines (org-mindmap-svg--node-text-lines node props))
          (r org-mindmap-svg-node-radius)
@@ -314,16 +339,41 @@ COLOR-TABLE maps nodes to inherited colors."
     (with-current-buffer out
       (insert (format "  <rect x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" rx=\"%s\" ry=\"%s\" fill=\"%s\" stroke=\"%s\" stroke-width=\"%s\"/>\n"
                       x ry w rh r r fill stroke org-mindmap-svg-stroke-width))
-      (cl-loop for line in lines
+      (cl-loop with multiline = (cdr lines)
+               for line in lines
                for i from 0
-               do (let ((ty (+ y (* (+ i 0.5) org-mindmap-svg-cell-height)
-                                (* 0.35 org-mindmap-svg-font-size)))
-                        (tx (+ x (/ w 2.0))))
-                    (insert (format "  <text x=\"%s\" y=\"%s\" font-family=\"%s\" font-size=\"%s\" fill=\"%s\" text-anchor=\"middle\">%s</text>\n"
-                                    tx ty org-mindmap-svg-font-family
-                                    org-mindmap-svg-font-size text-color
-                                    (org-mindmap-svg--runs-to-tspans
-                                     (org-mindmap-svg--markup-runs line)))))))))
+               for rowc = (+ y (* (+ i 0.5) org-mindmap-svg-cell-height))
+               do (cond
+                   ;; Org horizontal rule (>=5 dashes): a full-width line.
+                   ((string-match-p "\\`-\\{5,\\}\\'" (string-trim line))
+                    (insert (format "  <line x1=\"%s\" y1=\"%s\" x2=\"%s\" y2=\"%s\" stroke=\"%s\" stroke-width=\"1\"/>\n"
+                                    (+ x org-mindmap-svg-cell-width) rowc
+                                    (- (+ x w) org-mindmap-svg-cell-width) rowc
+                                    text-color)))
+                   (t
+                    (let* ((ty (+ rowc (* 0.35 org-mindmap-svg-font-size)))
+                           (cx (+ x (/ w 2.0)))
+                           ;; prettify a leading list bullet (- or +) as a dot
+                           (line (replace-regexp-in-string
+                                  "\\`\\([-+]\\)[ \t]+" "• " line))
+                           (runs (org-mindmap-svg--markup-runs line))
+                           (est (* (string-width (mapconcat #'car runs ""))
+                                   org-mindmap-svg-font-size 0.5))
+                           ;; Multi-line nodes read as a text block -> left-align
+                           ;; every line to a common inset; single-line stays
+                           ;; centered.  Flowing runs need text-anchor=start (a
+                           ;; middle anchor piles tspans up).
+                           anchor tx)
+                      (cond
+                       (multiline
+                        (setq anchor "start" tx (+ x org-mindmap-svg-cell-width)))
+                       ((cdr runs)
+                        (setq anchor "start" tx (- cx (/ est 2.0))))
+                       (t (setq anchor "middle" tx cx)))
+                      (insert (format "  <text x=\"%s\" y=\"%s\" font-family=\"%s\" font-size=\"%s\" fill=\"%s\" text-anchor=\"%s\">%s</text>\n"
+                                      tx ty org-mindmap-svg-font-family
+                                      org-mindmap-svg-font-size text-color anchor
+                                      (org-mindmap-svg--runs-to-tspans runs))))))))))
 
 (defun org-mindmap-svg--connector-svg (parent child side props color-table out)
   "Append an SVG curve from PARENT to CHILD on SIDE to buffer OUT using PROPS.
