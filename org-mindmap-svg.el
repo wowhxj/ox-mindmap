@@ -480,13 +480,24 @@ COLOR-TABLE maps nodes to their branch colors."
                             ('attr 0) ('image (plist-get s :ihpx)) (_ ch))))
          (top (+ y (max 0.0 (/ (- h packed) 2.0))))
          (vpad (min (/ org-mindmap-svg-box-vgap 2.0) (/ packed 3.0)))
-         (multiline (cdr specs)))
+         (multiline (cdr specs))
+         (cw org-mindmap-svg-cell-width)
+         ;; Border width hugs the *visible* content (text/image), not the
+         ;; reserved box (which is sized to the long link text).  Content is
+         ;; inset by one cell on each side inside a bordered node.
+         (content-w (cl-loop for s in specs maximize
+                             (pcase (plist-get s :kind)
+                               ('attr 0)
+                               ('image (plist-get s :iwpx))
+                               (_ (* cw (string-width (plist-get s :text)))))))
+         (rect-w (min w (+ content-w (* 2 cw))))
+         (ix (if has-text (+ x cw) x)))
     (with-current-buffer out
       ;; Background box only when the node has real text; a pure image floats
       ;; borderless.  The box hugs the packed content, not the reserved space.
       (when has-text
         (insert (format "  <rect x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" rx=\"%s\" ry=\"%s\" fill=\"%s\" stroke=\"%s\" stroke-width=\"%s\"/>\n"
-                        x (+ top vpad) w (- packed (* 2 vpad)) r r fill stroke
+                        x (+ top vpad) rect-w (- packed (* 2 vpad)) r r fill stroke
                         org-mindmap-svg-stroke-width)))
       (cl-loop with cy = top
                for s in specs
@@ -495,7 +506,7 @@ COLOR-TABLE maps nodes to their branch colors."
                     ('image
                      (let ((ih (plist-get s :ihpx)))
                        (insert (format "  <image x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" preserveAspectRatio=\"xMinYMid meet\" xlink:href=\"%s\"/>\n"
-                                       x cy (plist-get s :iwpx) ih (plist-get s :uri)))
+                                       ix cy (plist-get s :iwpx) ih (plist-get s :uri)))
                        (setq cy (+ cy ih))))
                     (_
                      (let* ((line (plist-get s :text))
@@ -507,8 +518,8 @@ COLOR-TABLE maps nodes to their branch colors."
                         ;; Org horizontal rule (>=5 dashes): a full-width line.
                         ((string-match-p "\\`-\\{5,\\}\\'" (string-trim line))
                          (insert (format "  <line x1=\"%s\" y1=\"%s\" x2=\"%s\" y2=\"%s\" stroke=\"%s\" stroke-width=\"1\"/>\n"
-                                         (+ x org-mindmap-svg-cell-width) rowc
-                                         (- (+ x w) org-mindmap-svg-cell-width) rowc
+                                         (+ x cw) rowc
+                                         (- (+ x rect-w) cw) rowc
                                          text-color)))
                         (t
                          (let* ((line (replace-regexp-in-string

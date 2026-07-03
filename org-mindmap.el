@@ -1067,6 +1067,48 @@ in-node break).  Falls back to `yank' when the option is unset."
                        (set-buffer-modified-p nil)))))
         (insert (replace-regexp-in-string "\n+\\'" "" text))))))
 
+(defun org-mindmap-resize-step (delta)
+  "Return the pixel step for DELTA (+1/-1), from `org-paste-plus-resize-step'."
+  (* delta (if (boundp 'org-paste-plus-resize-step)
+               org-paste-plus-resize-step 50)))
+
+(defun org-mindmap--latex-width (px)
+  "Return the LaTeX `\\linewidth' multiplier string for PX pixels."
+  (let* ((ref (if (boundp 'org-paste-plus-latex-reference-width)
+                  org-paste-plus-latex-reference-width 800.0))
+         (ratio (/ (float px) ref)))
+    (if (>= ratio 1.0) "1.0" (number-to-string ratio))))
+
+(defun org-mindmap--bump-widths (text step)
+  "Return TEXT with every integer `:width N' changed by STEP px (min 1).
+Matches a px width bounded by a non-digit (space, the `\\\\' break marker,
+`:', newline) or end.  A fractional `:width F\\linewidth' (LaTeX) is not
+bumped directly but recomputed from the new pixel width."
+  (with-temp-buffer
+    (insert text)
+    (let (new-px)
+      ;; Pass 1: integer px widths (ATTR_ORG / ATTR_HTML / plain).
+      (goto-char (point-min))
+      (while (re-search-forward ":width \\([0-9]+\\)\\(?:[^0-9.]\\|$\\)" nil t)
+        (setq new-px (max 1 (+ (string-to-number (match-string 1)) step)))
+        (replace-match (number-to-string new-px) t t nil 1))
+      ;; Pass 2: recompute the LaTeX \linewidth fraction from that px width.
+      (when new-px
+        (goto-char (point-min))
+        (when (re-search-forward ":width \\([0-9.]+\\)\\\\linewidth" nil t)
+          (replace-match (org-mindmap--latex-width new-px) t t nil 1))))
+    (buffer-string)))
+
+(defun org-mindmap--node-resize (delta)
+  "Bump every integer `:width N' in the node-edit minibuffer by DELTA steps.
+The in-minibuffer equivalent of `org-paste-plus-increase' / `-decrease':
+it edits the size that the next `C-c C-c' will render."
+  (let* ((cur (minibuffer-contents))
+         (new (org-mindmap--bump-widths cur (org-mindmap-resize-step delta))))
+    (unless (string= new cur)
+      (delete-minibuffer-contents)
+      (insert new))))
+
 (defvar org-mindmap-read-node-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map minibuffer-local-map)
@@ -1075,9 +1117,13 @@ in-node break).  Falls back to `yank' when the option is unset."
     ;; Route paste (whatever key runs `yank', e.g. Cmd-V) through the
     ;; configurable paste command so clipboard images can be inserted.
     (define-key map [remap yank] #'org-mindmap--node-paste)
+    ;; Resize an image's :width in place, mirroring org-paste-plus's C-+/C--.
+    (define-key map (kbd "C-+") (lambda () (interactive) (org-mindmap--node-resize 1)))
+    (define-key map (kbd "C--") (lambda () (interactive) (org-mindmap--node-resize -1)))
     map)
   "Minibuffer keymap for node text: `S-<return>' inserts an in-node break;
-paste is routed through `org-mindmap-node-paste-command'.")
+paste is routed through `org-mindmap-node-paste-command'; `C-+' / `C--'
+adjust an image `:width'.")
 
 (defun org-mindmap--read-node-text (prompt &optional text point-offset)
   "Read node text with PROMPT, allowing `S-<return>' for an in-node break.
@@ -1568,9 +1614,51 @@ nodes of that side."
           (org-return)))
     (org-return)))
 
+(defun org-mindmap-resize-node-image (delta)
+  "Change the `:width' of the image in the mindmap node at point by DELTA steps.
+Re-aligns the block so the new size takes effect on the next `C-c C-c'."
+  (cl-destructuring-bind (start end props roots target-node) (org-mindmap--get-state)
+    (unless target-node (user-error "No node at point"))
+    (let* ((text (org-mindmap-parser-node-text target-node))
+           (new (org-mindmap--bump-widths text (org-mindmap-resize-step delta))))
+      (if (string= new text)
+          (user-error "No :width to resize in this node")
+        (setf (org-mindmap-parser-node-text target-node) new)
+        (org-mindmap--update-buffer start end roots target-node props)))))
+
+;; `org-mindmap-mode' is defined below by `define-minor-mode'; declare it
+;; special here so the `let' in the dispatcher is a *dynamic* binding.
+(defvar org-mindmap-mode)
+
+(defun org-mindmap--resize-dispatch (delta)
+  "Resize the node image when in a mindmap region; else run the normal key.
+Falls through with `org-mindmap-mode' disabled so a bound `C-+' / `C--'
+elsewhere (e.g. `org-paste-plus') still works."
+  (if (org-mindmap-parser-region-active-p)
+      (org-mindmap-resize-node-image delta)
+    (let* ((org-mindmap-mode nil)
+           (cmd (key-binding (this-command-keys-vector))))
+      (when (commandp cmd)
+        (setq this-command cmd)
+        (call-interactively cmd)))))
+
+(defun org-mindmap-increase ()
+  "Grow the node image at point (in a mindmap region); else fall through."
+  (interactive)
+  (org-mindmap--resize-dispatch 1))
+
+(defun org-mindmap-decrease ()
+  "Shrink the node image at point (in a mindmap region); else fall through."
+  (interactive)
+  (org-mindmap--resize-dispatch -1))
+
 (defvar org-mindmap-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'org-mindmap-return)
+    ;; Resize an image's :width on its link/ATTR line inside a mindmap block,
+    ;; mirroring org-paste-plus's C-+/C--; outside a region these fall through.
+    (define-key map (kbd "C-+") #'org-mindmap-increase)
+    (define-key map (kbd "C--") #'org-mindmap-decrease)
     map))
 
 (define-minor-mode org-mindmap-mode
