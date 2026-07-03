@@ -264,5 +264,33 @@ are left untouched."
 
 (ox-mindmap--apply-interactive)
 
+;;; Image nodes: widen the box to fit an image line
+;;
+;; A node line that is a bare image link (e.g. `[[file:pic.png]]') renders as
+;; the picture.  We advise the engine's box calculation (rather than editing
+;; it) to widen the box so the image (and the link text on the canvas) fit.
+;; Height stays one row per line -- the SVG expands image rows on its own via
+;; the `:row-y' map -- so the source stays compact (no reserved blank rows).
+
+(defun ox-mindmap--node-box-advice (orig node props)
+  "Widen a node that contains an image line to fit it; ORIG handles the rest."
+  (or (when-let* ((cache (plist-get props :node-cache)))
+        (gethash node cache))
+      (let* ((base (funcall orig node props))
+             (specs (org-mindmap-svg--line-specs (cddr base)))
+             (box (if (cl-some (lambda (s) (eq (plist-get s :kind) 'image)) specs)
+                      (cons (max 1 (ceiling
+                                    (/ (apply #'max 1.0
+                                              (mapcar (lambda (s) (plist-get s :wpx))
+                                                      specs))
+                                       (float org-mindmap-svg-cell-width))))
+                            (cons (max 1 (length specs)) (cddr base)))
+                    base)))
+        (when-let* ((cache (plist-get props :node-cache)))
+          (puthash node box cache))
+        box)))
+
+(advice-add 'org-mindmap--node-box :around #'ox-mindmap--node-box-advice)
+
 (provide 'ox-mindmap)
 ;;; ox-mindmap.el ends here

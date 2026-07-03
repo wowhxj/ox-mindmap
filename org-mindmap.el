@@ -1031,13 +1031,53 @@ Uses PROPS for rendering."
   (cl-destructuring-bind (_start _end _props _roots target-node) (org-mindmap--get-state)
     target-node))
 
+(defcustom org-mindmap-node-paste-command nil
+  "Command used for paste while editing a node in the minibuffer.
+When non-nil (e.g. `org-paste-plus-dwim'), the node-edit minibuffer
+remaps `yank' to it, so whatever key you normally paste with (e.g. the
+macOS Cmd-V) runs it there -- letting a clipboard image be inserted as a
+file link (with any `#+ATTR' lines) into the node text.  nil keeps the
+default `yank'."
+  :type '(choice (const :tag "Default yank" nil) (function :tag "Command"))
+  :group 'org-mindmap)
+
+(defun org-mindmap--node-paste ()
+  "Paste in the node-edit minibuffer via `org-mindmap-node-paste-command'.
+The command runs in a scratch buffer that borrows the source Org buffer's
+file name and directory, so it can save a clipboard image into the right
+`.assets' folder; the text it produces is then inserted into the
+minibuffer (a trailing newline is dropped, inner newlines stay as an
+in-node break).  Falls back to `yank' when the option is unset."
+  (interactive)
+  (let ((cmd org-mindmap-node-paste-command))
+    (if (not (and cmd (commandp cmd)))
+        (call-interactively #'yank)
+      (let* ((src (window-buffer (minibuffer-selected-window)))
+             (bfn (and src (buffer-local-value 'buffer-file-name src)))
+             (dd  (and src (buffer-local-value 'default-directory src)))
+             (text (with-temp-buffer
+                     (when dd (setq default-directory dd))
+                     (when bfn (setq buffer-file-name bfn))
+                     (delay-mode-hooks (when (fboundp 'org-mode) (org-mode)))
+                     (unwind-protect
+                         (let ((enable-recursive-minibuffers t))
+                           (call-interactively cmd)
+                           (buffer-substring-no-properties (point-min) (point-max)))
+                       (setq buffer-file-name nil)
+                       (set-buffer-modified-p nil)))))
+        (insert (replace-regexp-in-string "\n+\\'" "" text))))))
+
 (defvar org-mindmap-read-node-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map minibuffer-local-map)
     (define-key map (kbd "S-<return>")
                 (lambda () (interactive) (insert "\n")))
+    ;; Route paste (whatever key runs `yank', e.g. Cmd-V) through the
+    ;; configurable paste command so clipboard images can be inserted.
+    (define-key map [remap yank] #'org-mindmap--node-paste)
     map)
-  "Minibuffer keymap for node text: `S-<return>' inserts an in-node break.")
+  "Minibuffer keymap for node text: `S-<return>' inserts an in-node break;
+paste is routed through `org-mindmap-node-paste-command'.")
 
 (defun org-mindmap--read-node-text (prompt &optional text point-offset)
   "Read node text with PROMPT, allowing `S-<return>' for an in-node break.

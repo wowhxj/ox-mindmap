@@ -197,6 +197,99 @@ holding the next palette index."
     (setq s (replace-regexp-in-string ">" "&gt;" s t t))
     s))
 
+;;
+;; Image nodes: a node whose text is a bare image link renders the image
+;;
+
+(defcustom org-mindmap-svg-image-max-width 260
+  "Maximum display width (px) for an embedded image node."
+  :type 'number :group 'org-mindmap-svg)
+
+(defcustom org-mindmap-svg-image-max-height 200
+  "Maximum display height (px) for an embedded image node."
+  :type 'number :group 'org-mindmap-svg)
+
+(defconst org-mindmap-svg--image-link-re
+  "\\`\\[\\[\\(?:file:\\)?\\([^][]+\\.\\(?:png\\|jpe?g\\|gif\\|svg\\|webp\\)\\)\\]\\]\\'"
+  "A node whose whole text matches is rendered as the image in submatch 1.")
+
+(defun org-mindmap-svg--image-link (text)
+  "Return the image path if TEXT is a bare Org image link, else nil."
+  (when text
+    (let ((s (string-trim text)) (case-fold-search t))
+      (when (string-match org-mindmap-svg--image-link-re s)
+        (match-string 1 s)))))
+
+(defun org-mindmap-svg--u (bytes i n big)
+  "Read an N-byte unsigned int at I in unibyte string BYTES (BIG endian if t)."
+  (let ((v 0))
+    (dotimes (k n)
+      (setq v (+ (* v 256) (aref bytes (+ i (if big k (- n 1 k)))))))
+    v))
+
+(defun org-mindmap-svg--parse-image-size (b ext)
+  "Return (W . H) in px parsed from header bytes B for extension EXT, or nil."
+  (pcase ext
+    ("png" (when (and (>= (length b) 24) (= (aref b 0) #x89) (= (aref b 1) ?P))
+             (cons (org-mindmap-svg--u b 16 4 t) (org-mindmap-svg--u b 20 4 t))))
+    ("gif" (when (>= (length b) 10)
+             (cons (org-mindmap-svg--u b 6 2 nil) (org-mindmap-svg--u b 8 2 nil))))
+    ((or "jpg" "jpeg")
+     (let ((i 2) (n (length b)) res)
+       (while (and (< (+ i 9) n) (not res))
+         (if (/= (aref b i) #xFF) (cl-incf i)
+           (let ((m (aref b (1+ i))))
+             (cond
+              ((memq m '(#xC0 #xC1 #xC2 #xC3 #xC5 #xC6 #xC7 #xC9 #xCA #xCB #xCD #xCE #xCF))
+               (setq res (cons (org-mindmap-svg--u b (+ i 7) 2 t)
+                               (org-mindmap-svg--u b (+ i 5) 2 t))))
+              ((or (= m #xD8) (= m #xD9)) (cl-incf i 2))
+              (t (cl-incf i (+ 2 (org-mindmap-svg--u b (+ i 2) 2 t))))))))
+       res))
+    ("svg" (let ((s (ignore-errors (decode-coding-string b 'utf-8))))
+             (cond
+              ((and s (string-match "viewBox=\"[-0-9.]+[ ,]+[-0-9.]+[ ,]+\\([0-9.]+\\)[ ,]+\\([0-9.]+\\)" s))
+               (cons (round (string-to-number (match-string 1 s)))
+                     (round (string-to-number (match-string 2 s)))))
+              ((and s (string-match "width=\"\\([0-9.]+\\)" s)
+                    (string-match "height=\"\\([0-9.]+\\)" s))
+               (cons (round (string-to-number (progn (string-match "width=\"\\([0-9.]+\\)" s) (match-string 1 s))))
+                     (round (string-to-number (progn (string-match "height=\"\\([0-9.]+\\)" s) (match-string 1 s)))))))))
+    (_ nil)))
+
+(defvar org-mindmap-svg--image-size-cache (make-hash-table :test 'equal)
+  "Memoize (abs-path -> (W . H)) so layout does not re-read files.")
+
+(defun org-mindmap-svg--image-size (path)
+  "Return (WIDTH . HEIGHT) in px for image PATH, reading its header, or nil."
+  (let ((abs (expand-file-name path)))
+    (if (gethash abs org-mindmap-svg--image-size-cache)
+        (gethash abs org-mindmap-svg--image-size-cache)
+      (let ((size (and (file-readable-p abs)
+                       (ignore-errors
+                         (with-temp-buffer
+                           (set-buffer-multibyte nil)
+                           (insert-file-contents-literally abs nil 0 65536)
+                           (org-mindmap-svg--parse-image-size
+                            (buffer-string)
+                            (downcase (or (file-name-extension abs) ""))))))))
+        (puthash abs size org-mindmap-svg--image-size-cache)
+        size))))
+
+(defun org-mindmap-svg--image-data-uri (path)
+  "Return a data: URI embedding image PATH, or nil if unreadable."
+  (let ((abs (expand-file-name path))
+        (ext (downcase (or (file-name-extension path) ""))))
+    (when (file-readable-p abs)
+      (let ((mime (pcase ext ("png" "image/png") ((or "jpg" "jpeg") "image/jpeg")
+                         ("gif" "image/gif") ("svg" "image/svg+xml")
+                         ("webp" "image/webp") (_ "application/octet-stream"))))
+        (format "data:%s;base64,%s" mime
+                (with-temp-buffer
+                  (set-buffer-multibyte nil)
+                  (insert-file-contents-literally abs)
+                  (base64-encode-string (buffer-string) t)))))))
+
 (defun org-mindmap-svg--node-text-lines (node props)
   "Return clean display lines for NODE (root delimiters stripped) using PROPS."
   (let* ((box (org-mindmap--node-box node props))
@@ -291,89 +384,151 @@ A leading-`*' Org heading line renders as a single bold run."
                  text))))
    runs ""))
 
+(defun org-mindmap-svg--attr-line-p (line)
+  "Non-nil if LINE is an Org keyword line (`#+KEY:'), hidden metadata.
+Covers #+ATTR_*, #+CAPTION, #+NAME, #+DOWNLOADED, etc."
+  (string-match-p "\\`[ \t]*#\\+[A-Za-z_]+:" line))
+
+(defun org-mindmap-svg--line-width-spec (line)
+  "Return the `:width' value (px) declared on LINE, or nil."
+  (when (string-match ":width[ \t]+\\([0-9]+\\)" line)
+    (string-to-number (match-string 1 line))))
+
+(defun org-mindmap-svg--line-specs (lines)
+  "Classify display LINES into render specs (text, hidden attr, or image).
+Each spec is a plist: :kind (text|attr|image), :text, :wpx (box-width
+contribution) and :hpx (row height in px).  Image specs add :uri and
+:iwpx (draw width).  A `:width' on a preceding attr line sizes the image."
+  (let ((cw org-mindmap-svg-cell-width)
+        (ch org-mindmap-svg-cell-height)
+        (pending nil) (specs nil))
+    (dolist (line lines (nreverse specs))
+      (let ((path (org-mindmap-svg--image-link line)))
+        (cond
+         ((org-mindmap-svg--attr-line-p line)
+          (when-let* ((w (org-mindmap-svg--line-width-spec line))) (setq pending w))
+          (push (list :kind 'attr :text line :wpx 0 :hpx 0) specs))
+         ((and path (org-mindmap-svg--image-data-uri path))
+          (let* ((uri (org-mindmap-svg--image-data-uri path))
+                 (size (org-mindmap-svg--image-size path))
+                 (ratio (if size (/ (float (car size)) (cdr size)) 1.6))
+                 (iwpx (cond (pending (float pending))
+                             (size (min (float org-mindmap-svg-image-max-width)
+                                        (* org-mindmap-svg-image-max-height ratio)
+                                        (float (car size))))
+                             (t (float org-mindmap-svg-image-max-width))))
+                 (ihpx (/ iwpx ratio)))
+            (setq pending nil)
+            (push (list :kind 'image :text line :uri uri :iwpx iwpx :ihpx ihpx
+                        :hpx (+ ihpx org-mindmap-svg-box-vgap)
+                        :wpx (max iwpx (* cw (string-width line))))
+                  specs)))
+         (t
+          (push (list :kind 'text :text line
+                      :wpx (* cw (string-width line)) :hpx ch)
+                specs)))))))
+
 (defun org-mindmap-svg--node-geometry (node props)
-  "Return plist (:x :y :w :h) in pixels for NODE using PROPS."
+  "Return plist (:x :y :w :h) in pixels for NODE using PROPS.
+Row Y comes from the `:row-y' cumulative map when present, so rows that
+hold a tall image expand in the SVG without any blank rows in the source."
   (let* ((box (org-mindmap--node-box node props))
          (cw org-mindmap-svg-cell-width)
          (ch org-mindmap-svg-cell-height)
+         (row-y (plist-get props :row-y))
          (col (org-mindmap-parser-node-col node))
          (row (org-mindmap-parser-node-row node))
          (width (car box))
-         (height (cadr box)))
-    (list :x (* col cw)
-          :y (* row ch)
-          :w (* width cw)
-          :h (* height ch))))
+         (height (cadr box))
+         (y0 (if row-y (aref row-y row) (* row ch)))
+         (y1 (if row-y (aref row-y (+ row height)) (* (+ row height) ch))))
+    (list :x (* col cw) :y y0 :w (* width cw) :h (- y1 y0))))
 
 ;;
 ;; SVG emission
 ;;
 
 (defun org-mindmap-svg--node-svg (node props color-table out)
-  "Append SVG for NODE rectangle and text to buffer OUT, using PROPS.
-COLOR-TABLE maps nodes to inherited colors."
+  "Append SVG for NODE (background, text lines and inline images) to OUT.
+COLOR-TABLE maps nodes to their branch colors."
   (let* ((g (org-mindmap-svg--node-geometry node props))
          (x (plist-get g :x)) (y (plist-get g :y))
          (w (plist-get g :w)) (h (plist-get g :h))
+         (ch org-mindmap-svg-cell-height)
+         (specs (org-mindmap-svg--line-specs
+                 (org-mindmap-svg--node-text-lines node props)))
+         (has-text (cl-some (lambda (s) (eq (plist-get s :kind) 'text)) specs))
          (color (or (gethash node color-table) org-mindmap-svg-neutral-color))
-         ;; Depth fade lightens the *fill* only; a deeper subtree looks
-         ;; paler while its border and text keep the branch color and stay
-         ;; readable (`steps' = levels below the branch head).
+         ;; Depth fade lightens the *fill* only; border and text keep the
+         ;; branch color so deep nodes stay legible.
          (depth (or (org-mindmap-parser-node-depth node) 0))
          (paint-depth (or (plist-get props :paint-depth) 0))
          (steps (max 0 (- depth paint-depth 1)))
          (fade (min 0.7 (* steps org-mindmap-svg-depth-fade)))
          (faded (org-mindmap-svg--blend color "white" (- 1.0 fade)))
-         ;; keep a hint of the gradient on the border but never invisible
          (stroke (org-mindmap-svg--hex
                   (org-mindmap-svg--blend color "white" (- 1.0 (min 0.3 fade)))))
          (fill (org-mindmap-svg--blend faded "white" 0.12))
          (text-color (org-mindmap-svg--blend color "black" 0.7))
-         (lines (org-mindmap-svg--node-text-lines node props))
          (r org-mindmap-svg-node-radius)
-         ;; Shrink the box vertically so tightly-stacked siblings keep a
-         ;; visible gap; text and connectors stay on the original centre.
-         (vpad (min (/ org-mindmap-svg-box-vgap 2.0) (/ h 3.0)))
-         (ry (+ y vpad))
-         (rh (- h (* 2 vpad))))
+         ;; Pack the node's visible lines locally (text = a row, image = its
+         ;; own height, hidden attr = 0) and center that block in the space
+         ;; the layout reserved.  This keeps text and image adjacent even when
+         ;; the metadata rows between them cannot collapse (shared grid rows).
+         (packed (cl-loop for s in specs sum
+                          (pcase (plist-get s :kind)
+                            ('attr 0) ('image (plist-get s :ihpx)) (_ ch))))
+         (top (+ y (max 0.0 (/ (- h packed) 2.0))))
+         (vpad (min (/ org-mindmap-svg-box-vgap 2.0) (/ packed 3.0)))
+         (multiline (cdr specs)))
     (with-current-buffer out
-      (insert (format "  <rect x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" rx=\"%s\" ry=\"%s\" fill=\"%s\" stroke=\"%s\" stroke-width=\"%s\"/>\n"
-                      x ry w rh r r fill stroke org-mindmap-svg-stroke-width))
-      (cl-loop with multiline = (cdr lines)
-               for line in lines
-               for i from 0
-               for rowc = (+ y (* (+ i 0.5) org-mindmap-svg-cell-height))
-               do (cond
-                   ;; Org horizontal rule (>=5 dashes): a full-width line.
-                   ((string-match-p "\\`-\\{5,\\}\\'" (string-trim line))
-                    (insert (format "  <line x1=\"%s\" y1=\"%s\" x2=\"%s\" y2=\"%s\" stroke=\"%s\" stroke-width=\"1\"/>\n"
-                                    (+ x org-mindmap-svg-cell-width) rowc
-                                    (- (+ x w) org-mindmap-svg-cell-width) rowc
-                                    text-color)))
-                   (t
-                    (let* ((ty (+ rowc (* 0.35 org-mindmap-svg-font-size)))
-                           (cx (+ x (/ w 2.0)))
-                           ;; prettify a leading list bullet (- or +) as a dot
-                           (line (replace-regexp-in-string
-                                  "\\`\\([-+]\\)[ \t]+" "• " line))
-                           (runs (org-mindmap-svg--markup-runs line))
-                           (est (* (string-width (mapconcat #'car runs ""))
-                                   org-mindmap-svg-font-size 0.5))
-                           ;; Multi-line nodes read as a text block -> left-align
-                           ;; every line to a common inset; single-line stays
-                           ;; centered.  Flowing runs need text-anchor=start (a
-                           ;; middle anchor piles tspans up).
-                           anchor tx)
-                      (cond
-                       (multiline
-                        (setq anchor "start" tx (+ x org-mindmap-svg-cell-width)))
-                       ((cdr runs)
-                        (setq anchor "start" tx (- cx (/ est 2.0))))
-                       (t (setq anchor "middle" tx cx)))
-                      (insert (format "  <text x=\"%s\" y=\"%s\" font-family=\"%s\" font-size=\"%s\" fill=\"%s\" text-anchor=\"%s\">%s</text>\n"
-                                      tx ty org-mindmap-svg-font-family
-                                      org-mindmap-svg-font-size text-color anchor
-                                      (org-mindmap-svg--runs-to-tspans runs))))))))))
+      ;; Background box only when the node has real text; a pure image floats
+      ;; borderless.  The box hugs the packed content, not the reserved space.
+      (when has-text
+        (insert (format "  <rect x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" rx=\"%s\" ry=\"%s\" fill=\"%s\" stroke=\"%s\" stroke-width=\"%s\"/>\n"
+                        x (+ top vpad) w (- packed (* 2 vpad)) r r fill stroke
+                        org-mindmap-svg-stroke-width)))
+      (cl-loop with cy = top
+               for s in specs
+               do (pcase (plist-get s :kind)
+                    ('attr nil)         ; metadata line: hidden, zero height
+                    ('image
+                     (let ((ih (plist-get s :ihpx)))
+                       (insert (format "  <image x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" preserveAspectRatio=\"xMinYMid meet\" xlink:href=\"%s\"/>\n"
+                                       x cy (plist-get s :iwpx) ih (plist-get s :uri)))
+                       (setq cy (+ cy ih))))
+                    (_
+                     (let* ((line (plist-get s :text))
+                            (rowc (+ cy (* 0.5 ch)))
+                            (ty (+ rowc (* 0.35 org-mindmap-svg-font-size)))
+                            (cx (+ x (/ w 2.0))))
+                       (setq cy (+ cy ch))
+                       (cond
+                        ;; Org horizontal rule (>=5 dashes): a full-width line.
+                        ((string-match-p "\\`-\\{5,\\}\\'" (string-trim line))
+                         (insert (format "  <line x1=\"%s\" y1=\"%s\" x2=\"%s\" y2=\"%s\" stroke=\"%s\" stroke-width=\"1\"/>\n"
+                                         (+ x org-mindmap-svg-cell-width) rowc
+                                         (- (+ x w) org-mindmap-svg-cell-width) rowc
+                                         text-color)))
+                        (t
+                         (let* ((line (replace-regexp-in-string
+                                       "\\`\\([-+]\\)[ \t]+" "• " line))
+                                (runs (org-mindmap-svg--markup-runs line))
+                                (est (* (string-width (mapconcat #'car runs ""))
+                                        org-mindmap-svg-font-size 0.5))
+                                ;; multi-line -> left-align block; single-line
+                                ;; centers.  Flowing runs need anchor=start.
+                                anchor tx)
+                           (cond
+                            (multiline
+                             (setq anchor "start" tx (+ x org-mindmap-svg-cell-width)))
+                            ((cdr runs)
+                             (setq anchor "start" tx (- cx (/ est 2.0))))
+                            (t (setq anchor "middle" tx cx)))
+                           (insert (format "  <text x=\"%s\" y=\"%s\" font-family=\"%s\" font-size=\"%s\" fill=\"%s\" text-anchor=\"%s\">%s</text>\n"
+                                           tx ty org-mindmap-svg-font-family
+                                           org-mindmap-svg-font-size text-color anchor
+                                           (org-mindmap-svg--runs-to-tspans runs)))))))))))))
 
 (defun org-mindmap-svg--connector-svg (parent child side props color-table out)
   "Append an SVG curve from PARENT to CHILD on SIDE to buffer OUT using PROPS.
@@ -416,6 +571,27 @@ COLOR-TABLE maps nodes to inherited colors."
            (cw org-mindmap-svg-cell-width)
            (ch org-mindmap-svg-cell-height)
            (m org-mindmap-svg-margin)
+           ;; Build a row -> Y map so a row holding a tall image expands in the
+           ;; SVG (pushing rows below it down) without adding blank rows to the
+           ;; source.  extra[r] = how many px beyond one cell row r needs.
+           (maxrow (1+ (cl-loop for n in all-nodes maximize
+                                (+ (org-mindmap-parser-node-row n)
+                                   (cadr (org-mindmap--node-box n props))))))
+           (extra (make-vector (+ maxrow 1) 0))
+           (_ (dolist (n all-nodes)
+                (let ((r0 (org-mindmap-parser-node-row n))
+                      (specs (org-mindmap-svg--line-specs
+                              (org-mindmap-svg--node-text-lines n props))))
+                  (cl-loop for s in specs for i from 0
+                           for r = (+ r0 i)
+                           when (< r (length extra))
+                           do (aset extra r (max (aref extra r)
+                                                 (- (plist-get s :hpx) ch)))))))
+           (row-y (let ((v (make-vector (+ maxrow 2) 0)))
+                    (dotimes (r (1+ maxrow))
+                      (aset v (1+ r) (+ (aref v r) ch (aref extra r))))
+                    v))
+           (props (plist-put props :row-y row-y))
            (max-x (cl-loop for n in all-nodes maximize
                            (let ((g (org-mindmap-svg--node-geometry n props)))
                              (+ (plist-get g :x) (plist-get g :w)))))
@@ -429,7 +605,7 @@ COLOR-TABLE maps nodes to inherited colors."
         (org-mindmap-svg--assign-colors root props nil color-table color-counter))
       (with-temp-buffer
         (insert (format "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"))
-        (insert (format "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%s\" height=\"%s\" viewBox=\"0 0 %s %s\">\n"
+        (insert (format "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"%s\" height=\"%s\" viewBox=\"0 0 %s %s\">\n"
                         width height width height))
         (when org-mindmap-svg-background
           (insert (format "  <rect x=\"0\" y=\"0\" width=\"%s\" height=\"%s\" fill=\"%s\"/>\n"

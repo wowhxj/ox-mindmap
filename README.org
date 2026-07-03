@@ -115,6 +115,35 @@ minibuffer shows real newlines and the break is stored as Org's =\\=
 marker. Blank lines are kept, so you can group lines visually. Multi-line
 nodes are *left-aligned*; single-line nodes stay centered.
 
+* Images in nodes
+A node line that is a bare image link (=[[file:pic.png]]=, for =png= /
+=jpg= / =gif= / =svg= / =webp=) is rendered as the *image itself*, embedded
+in the SVG. It can stand alone or sit among text lines in a multi-line
+node (text and picture in one box).
+
+Size it with the usual Org attribute line just before the link — the
+=:width= (in px) is honoured and the keyword lines themselves are hidden:
+
+#+begin_src
+见下图：\\#+ATTR_ORG: :width 800\\[[file:pic.png]]
+#+end_src
+
+Any =#+KEYWORD:= line (=#+ATTR_*=, =#+CAPTION=, =#+DOWNLOADED=, …) is
+treated as hidden metadata. Without a =:width= the image is scaled to fit
+=org-mindmap-svg-image-max-width= / =-max-height=. The source stays
+compact — an image reserves no blank rows; the SVG expands only that row.
+
+To paste a clipboard image while editing a node, set
+=org-mindmap-node-paste-command= to your paste command, e.g.:
+
+#+begin_src elisp
+(setq org-mindmap-node-paste-command #'org-paste-plus-dwim)
+#+end_src
+
+The node-edit minibuffer then routes paste (whatever key runs =yank=, e.g.
+macOS =Cmd-V=) through it — borrowing the buffer's file name so the image
+is saved to the right =.assets/= folder and inserted as a link.
+
 * Installation — self-contained, no dependencies
 ox-mindmap *bundles* the org-mindmap engine (the =org-mindmap*.el= files in
 this repository), so it is fully self-contained: install this one package
