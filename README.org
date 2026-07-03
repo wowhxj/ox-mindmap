@@ -95,6 +95,13 @@ rather than the engine's own redraw, so re-align, image export and the
 This behaviour is controlled by =ox-mindmap-interactive= (default =t=); set
 it to =nil= to disable the in-block editor and keep only =C-c C-c=.
 
+* Rich text in nodes
+Node text may use Org's inline markup and it is rendered as such in the
+SVG: =*bold*=, =/italic/=, =_underline_=, =+strike+=, =~code~= / ==verbatim==
+(monospace), and links =[[target][description]]= (the description is shown,
+in a link colour; a bare =[[target]]= shows the target). A markup token that
+gets split across lines by wrapping is left literal.
+
 * Installation — self-contained, no dependencies
 ox-mindmap *bundles* the org-mindmap engine (the =org-mindmap*.el= files in
 this repository), so it is fully self-contained: install this one package

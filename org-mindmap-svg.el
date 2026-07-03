@@ -218,6 +218,64 @@ holding the next palette index."
                                     (string-to-list line)))))
             lines)))
 
+(defconst org-mindmap-svg--link-re
+  "\\[\\[\\([^]]+\\)\\]\\(?:\\[\\([^]]*\\)\\]\\)?\\]"
+  "Org link: submatch 1 is the target, optional submatch 2 the description.")
+
+(defconst org-mindmap-svg--emphasis-re
+  "\\([*/_=~+]\\)\\([^ \t\n][^\n]*?\\)\\1"
+  "Org inline emphasis: submatch 1 is the marker, submatch 2 the body.")
+
+(defun org-mindmap-svg--marker-attrs (marker)
+  "Return the tspan attribute plist for an org emphasis MARKER char."
+  (pcase marker
+    (?* '(:font-weight "bold"))
+    (?/ '(:font-style "italic"))
+    (?_ '(:text-decoration "underline"))
+    (?+ '(:text-decoration "line-through"))
+    ((or ?= ?~) '(:font-family "monospace"))))
+
+(defun org-mindmap-svg--markup-runs (line)
+  "Split LINE into (TEXT . ATTRS) runs, parsing org links and emphasis.
+ATTRS is a tspan attribute plist (nil for plain text).  A markup token
+that is not closed within LINE (e.g. split by wrapping) is left literal."
+  (let ((runs '()) (i 0) (n (length line)))
+    (while (< i n)
+      (let ((lpos (string-match org-mindmap-svg--link-re line i))
+            (epos (string-match org-mindmap-svg--emphasis-re line i)))
+        (cond
+         ((and (null lpos) (null epos))
+          (push (cons (substring line i) nil) runs) (setq i n))
+         ((and lpos (or (null epos) (<= lpos epos)))
+          (string-match org-mindmap-svg--link-re line i) ; restore match data
+          (when (> lpos i) (push (cons (substring line i lpos) nil) runs))
+          (push (cons (or (match-string 2 line) (match-string 1 line))
+                      '(:fill "#3b6ea5" :text-decoration "underline"))
+                runs)
+          (setq i (match-end 0)))
+         (t
+          (string-match org-mindmap-svg--emphasis-re line i) ; restore match data
+          (when (> epos i) (push (cons (substring line i epos) nil) runs))
+          (push (cons (match-string 2 line)
+                      (org-mindmap-svg--marker-attrs (aref line epos)))
+                runs)
+          (setq i (match-end 0))))))
+    (nreverse runs)))
+
+(defun org-mindmap-svg--runs-to-tspans (runs)
+  "Render RUNS (from `org-mindmap-svg--markup-runs') as escaped SVG tspans."
+  (mapconcat
+   (lambda (run)
+     (let ((text (org-mindmap-svg--xml-escape (car run)))
+           (attrs (cdr run)))
+       (if (null attrs)
+           text
+         (format "<tspan%s>%s</tspan>"
+                 (cl-loop for (k v) on attrs by #'cddr
+                          concat (format " %s=\"%s\"" (substring (symbol-name k) 1) v))
+                 text))))
+   runs ""))
+
 (defun org-mindmap-svg--node-geometry (node props)
   "Return plist (:x :y :w :h) in pixels for NODE using PROPS."
   (let* ((box (org-mindmap--node-box node props))
@@ -264,7 +322,8 @@ COLOR-TABLE maps nodes to inherited colors."
                     (insert (format "  <text x=\"%s\" y=\"%s\" font-family=\"%s\" font-size=\"%s\" fill=\"%s\" text-anchor=\"middle\">%s</text>\n"
                                     tx ty org-mindmap-svg-font-family
                                     org-mindmap-svg-font-size text-color
-                                    (org-mindmap-svg--xml-escape line))))))))
+                                    (org-mindmap-svg--runs-to-tspans
+                                     (org-mindmap-svg--markup-runs line)))))))))
 
 (defun org-mindmap-svg--connector-svg (parent child side props color-table out)
   "Append an SVG curve from PARENT to CHILD on SIDE to buffer OUT using PROPS.
