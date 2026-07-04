@@ -1643,14 +1643,16 @@ trims the margin back on the next render."
                 (org-mindmap--pad-other-body-lines start end)))))))))
 
 (defun org-mindmap-return ()
-  "If on a mindmap node, insert a sibling, otherwise call `org-return'."
+  "Insert a sibling when on a mindmap node; else run RET's normal command.
+The minor-mode map shadows RET buffer-wide, so outside a mindmap region
+\(or inside one but not on a node) we must not force `org-return' -- that
+would bypass whatever else binds RET.  Fall through to the real binding
+instead, exactly as the navigation keys do."
   (interactive)
-  (if (org-mindmap-parser-region-active-p)
-      (let ((node (org-mindmap-find-node-at-point)))
-        (if node
-            (org-mindmap-insert-sibling)
-          (org-return)))
-    (org-return)))
+  (if (and (org-mindmap-parser-region-active-p)
+           (org-mindmap-find-node-at-point))
+      (org-mindmap-insert-sibling)
+    (org-mindmap--fall-through)))
 
 (defun org-mindmap-resize-node-image (delta)
   "Change the `:width' of the image in the mindmap node at point by DELTA steps.
