@@ -486,7 +486,12 @@ VISITED keeps track of visited locations."
                ((org-mindmap-parser--snaps lines prow pcol possible-dir)
                 (org-mindmap-parser--go lines prow pcol possible-dir parent visited next-side point-row point-col))
                ((= (cdr possible-dir) 0)
-                (let* ((node-res (org-mindmap-parser--consume-node lines prow pcol possible-dir parent visited next-side point-row point-col))
+                ;; A connector leading to empty text is a real (just-created)
+                ;; node only when the cursor sits on it -- materialize it so
+                ;; edit/delete can target it -- otherwise it is dropped as
+                ;; before, avoiding spurious empty nodes elsewhere.
+                (let* ((node-res (org-mindmap-parser--consume-node lines prow pcol possible-dir parent visited next-side point-row point-col
+                                                                   (and point-row (= point-row prow))))
                        (new-node (car node-res))
                        (nxt (cdr node-res))
                        (nxt-row (car nxt))

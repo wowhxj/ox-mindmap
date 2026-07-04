@@ -479,6 +479,7 @@ COLOR-TABLE maps nodes to their branch colors."
                           (pcase (plist-get s :kind)
                             ('attr 0) ('image (plist-get s :ihpx)) (_ ch))))
          (top (+ y (max 0.0 (/ (- h packed) 2.0))))
+         (has-image (cl-some (lambda (s) (eq (plist-get s :kind) 'image)) specs))
          (vpad (min (/ org-mindmap-svg-box-vgap 2.0) (/ packed 3.0)))
          (multiline (cdr specs))
          (cw org-mindmap-svg-cell-width)
@@ -491,14 +492,28 @@ COLOR-TABLE maps nodes to their branch colors."
                                ('image (plist-get s :iwpx))
                                (_ (* cw (string-width (plist-get s :text)))))))
          (rect-w (min w (+ content-w (* 2 cw))))
-         (ix (if has-text (+ x cw) x)))
+         ;; A node is framed when it has text or an image; only a truly empty
+         ;; node is left bare.  Framed content is inset one cell on the left
+         ;; (IX), matched by the border box below.
+         (bordered (or has-text has-image))
+         (ix (if bordered (+ x cw) x))
+         ;; Border box.  Text nodes: inset by VPAD for a neighbour gap.
+         ;; Image nodes: leave an even one-cell margin on every side (matching
+         ;; the left inset IX = x+cw), and never clamp to the reserved width W
+         ;; -- a scaled image is often wider than the text-grid box, and the
+         ;; frame must sit outside it, not cut through it.
+         (bx x)
+         (by (if has-image (- top cw) (+ top vpad)))
+         (bw (if has-image (+ content-w (* 2 cw)) rect-w))
+         (bh (if has-image (+ packed (* 2 cw)) (- packed (* 2 vpad)))))
     (with-current-buffer out
       ;; Background box only when the node has real text; a pure image floats
       ;; borderless.  The box hugs the packed content, not the reserved space.
-      (when has-text
-        (insert (format "  <rect x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" rx=\"%s\" ry=\"%s\" fill=\"%s\" stroke=\"%s\" stroke-width=\"%s\"/>\n"
-                        x (+ top vpad) rect-w (- packed (* 2 vpad)) r r fill stroke
-                        org-mindmap-svg-stroke-width)))
+      ;; Fill goes behind the content; the border stroke is emitted *after*
+      ;; the content (below) so an image cannot paint over it.
+      (when bordered
+        (insert (format "  <rect x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" rx=\"%s\" ry=\"%s\" fill=\"%s\" stroke=\"none\"/>\n"
+                        bx by bw bh r r fill)))
       (cl-loop with cy = top
                for s in specs
                do (pcase (plist-get s :kind)
@@ -539,7 +554,13 @@ COLOR-TABLE maps nodes to their branch colors."
                            (insert (format "  <text x=\"%s\" y=\"%s\" font-family=\"%s\" font-size=\"%s\" fill=\"%s\" text-anchor=\"%s\">%s</text>\n"
                                            tx ty org-mindmap-svg-font-family
                                            org-mindmap-svg-font-size text-color anchor
-                                           (org-mindmap-svg--runs-to-tspans runs)))))))))))))
+                                           (org-mindmap-svg--runs-to-tspans runs))))))))))
+      ;; Border stroke on top of the content so a full-height image cannot
+      ;; cover the bottom edge (see the fill rect above).
+      (when bordered
+        (insert (format "  <rect x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" rx=\"%s\" ry=\"%s\" fill=\"none\" stroke=\"%s\" stroke-width=\"%s\"/>\n"
+                        bx by bw bh r r stroke
+                        org-mindmap-svg-stroke-width))))))
 
 (defun org-mindmap-svg--connector-svg (parent child side props color-table out)
   "Append an SVG curve from PARENT to CHILD on SIDE to buffer OUT using PROPS.
