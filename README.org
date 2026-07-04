@@ -72,14 +72,34 @@ place after every edit.
 | =M-RET=                     | *edit* the text of the node at point                            |
 | =M-<left>= / =M-<right>=      | *promote* / *demote* the node; on a root child, *flip* its side  |
 | =M-<up>= / =M-<down>=         | swap the node with its *previous* / *next* sibling              |
+| =C-c <left>= / =C-c <right>=    | *move point* one node *left* / *right* on the canvas (mirror-correct on the left wing) |
+| =C-c <up>= / =C-c <down>=       | *move point* to the *previous* / *next* sibling, or the nearest *same-level* node above / below |
+| =C-c C-d=                   | *delete* the node at point and all its descendants             |
+| =C-+= / =C--=                  | grow / shrink an image node's =:width= (on an image node)        |
 | =C-c C-c=                   | run the block: re-align the body *and* (re)export the image      |
-| =M-x org-mindmap-delete-node= | delete the node at point and all its descendants                |
+
+=C-c <left>= / =C-c <right>= move *horizontally* as drawn: moving *outward*
+(away from the root) descends to a child, moving *inward* ascends to the
+parent. On the left wing this is mirrored, so on a left-side node =<right>=
+walks back toward the root. On the root itself, =<right>= enters the first
+right branch and =<left>= the first left branch. =C-c <up>= / =C-c <down>=
+move *vertically*: first among the node's own siblings, and at the top/bottom
+sibling they step to the nearest node at the *same level* above / below,
+crossing parent boundaries. A minor-mode map outranks
+the major mode, so these shadow any =C-c <arrow>= binding (e.g. =winner=)
+*only inside a mindmap block*; everywhere else in the buffer each key falls
+back to its normal command. (Plain =C-c <arrow>= is used rather than
+=C-c C-<arrow>=, which macOS intercepts for Mission Control / Spaces.)
 
 The root node can branch *both ways*: =TAB= grows the right side, =C-u TAB=
 the left. A first-level branch's side is inherited by its whole subtree,
 so you only choose left/right once per top-level branch; =M-<left>= /
 =M-<right>= on a root child flips that branch (and its descendants) to the
-other side.
+other side. Left-side nodes are anchored to their connector and grow
+*leftward*, so while you type into one the block keeps the connector in
+column: it reclaims a leading space on the line, or once the text reaches
+the margin it widens the whole block's left margin instead, so the node
+can grow without limit. On the next =C-c C-c= it re-renders exactly.
 
 These come from the bundled engine's =org-mindmap-mode= minor mode, which
 ox-mindmap turns on automatically in any buffer that contains a mindmap

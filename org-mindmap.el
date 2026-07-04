@@ -1604,6 +1604,44 @@ nodes of that side."
     (org-mindmap-edit-node)
     t))
 
+(defun org-mindmap--pad-other-body-lines (start end)
+  "Prepend a space to every block body line except the one point is on.
+Widens the whole map's left margin by one column so a left node whose text
+has reached column 0 can keep growing leftward while its connector stays
+in place (it moves right with every other line)."
+  (let ((endm (copy-marker end))
+        (cur (line-number-at-pos)))
+    (save-excursion
+      ;; START sits on the `#+begin_src' line; body begins one line down.
+      (goto-char start)
+      (forward-line 1)
+      (while (< (point) endm)
+        (when (and (/= (line-number-at-pos) cur) (not (eolp)))
+          (insert " "))
+        (forward-line 1)))))
+
+(defun org-mindmap--left-justify-after-insert ()
+  "Keep a left node's connector fixed while typing into it.
+Left nodes are right-anchored: their `─╯'/`─╮'/`─┼' connector sits under
+the parent's gutter and the text grows leftward.  Plain typing inserts
+left-to-right, shoving that connector out of column and breaking the art
+on the next re-parse.  After a single self-inserted character in a left
+node, keep the connector column fixed: reclaim one leading space on this
+line if there is one, otherwise widen the left margin by padding every
+other body line (so the node grows leftward without limit).  `C-c C-c'
+trims the margin back on the next render."
+  (when (and (memq this-command '(self-insert-command org-self-insert-command))
+             (org-mindmap-parser-region-active-p))
+    (let ((state (ignore-errors (org-mindmap--get-state))))
+      (when state
+        (cl-destructuring-bind (start end _props _roots target) state
+          (when (and target (eq (org-mindmap-parser-node-side target) 'left))
+            (save-excursion
+              (beginning-of-line)
+              (if (eq (char-after) ?\s)
+                  (delete-char 1)
+                (org-mindmap--pad-other-body-lines start end)))))))))
+
 (defun org-mindmap-return ()
   "If on a mindmap node, insert a sibling, otherwise call `org-return'."
   (interactive)
@@ -1652,6 +1690,131 @@ elsewhere (e.g. `org-paste-plus') still works."
   (interactive)
   (org-mindmap--resize-dispatch -1))
 
+;;
+;; Point Navigation — move the cursor between nodes
+;;
+
+(defun org-mindmap--fall-through ()
+  "Run the current key's normal binding with `org-mindmap-mode' disabled.
+Lets a mode-map key stay inert outside a mindmap region."
+  (let* ((org-mindmap-mode nil)
+         (cmd (key-binding (this-command-keys-vector))))
+    (when (commandp cmd)
+      (setq this-command cmd)
+      (call-interactively cmd))))
+
+(defun org-mindmap--goto-node (node start)
+  "Move point onto NODE within the region beginning at START."
+  (goto-char start)
+  (forward-line (1+ (org-mindmap-parser-node-row node)))
+  (move-to-column (org-mindmap-parser-node-col node))
+  (while (looking-at " ") (forward-char)))
+
+(defun org-mindmap--navigate (fn)
+  "Move point to the node FN returns for (TARGET ROOTS), if any.
+Falls through to the normal key binding outside a mindmap region."
+  (if (org-mindmap-parser-region-active-p)
+      (cl-destructuring-bind (start _end _props roots target) (org-mindmap--get-state)
+        (if (null target)
+            (org-mindmap--fall-through)
+          (let ((dest (funcall fn target roots)))
+            (if dest
+                (org-mindmap--goto-node dest start)
+              (message "No node in that direction")))))
+    (org-mindmap--fall-through)))
+
+(defun org-mindmap--horizontal-move (target dir)
+  "Return the node in screen direction DIR (`left'/`right') from TARGET.
+Geometry is mirrored on the left: a left node's children lie further left
+and its parent lies to the right.  So moving outward (DIR = node's side)
+descends to a child; moving inward ascends to the parent.  On the root
+\(side nil), DIR selects the first child on that side."
+  (let ((side (org-mindmap-parser-node-side target)))
+    (if side
+        (if (eq dir side)
+            (car (org-mindmap-parser-node-children target))
+          (org-mindmap-parser-node-parent target))
+      (cl-find dir (org-mindmap-parser-node-children target)
+               :key #'org-mindmap-parser-node-side))))
+
+(defun org-mindmap-goto-left ()
+  "Move point one node to the left (toward a left child or a right parent)."
+  (interactive)
+  (org-mindmap--navigate
+   (lambda (target _roots) (org-mindmap--horizontal-move target 'left))))
+
+(defun org-mindmap-goto-right ()
+  "Move point one node to the right (toward a right child or a left parent)."
+  (interactive)
+  (org-mindmap--navigate
+   (lambda (target _roots) (org-mindmap--horizontal-move target 'right))))
+
+(defun org-mindmap--all-nodes (roots)
+  "Return every node under ROOTS as a flat list (pre-order)."
+  (let (acc)
+    (cl-labels ((walk (n)
+                  (push n acc)
+                  (mapc #'walk (org-mindmap-parser-node-children n))))
+      (mapc #'walk roots))
+    (nreverse acc)))
+
+(defun org-mindmap--siblings (target roots)
+  "Return TARGET's same-side siblings (including TARGET), row-sorted.
+Top-level nodes are siblings of one another (parent is nil).  The side
+filter matters at the root, whose children span both wings: a left branch
+must not treat a right branch as its vertical neighbour."
+  (let* ((parent (org-mindmap-parser-node-parent target))
+         (side (org-mindmap-parser-node-side target))
+         (sibs (cl-remove-if-not
+                (lambda (n) (eq (org-mindmap-parser-node-side n) side))
+                (if parent (org-mindmap-parser-node-children parent) roots))))
+    (sort (copy-sequence sibs)
+          (lambda (a b) (< (org-mindmap-parser-node-row a)
+                           (org-mindmap-parser-node-row b))))))
+
+(defun org-mindmap--vertical-move (target roots dir)
+  "Return the node DIR (+1 down / -1 up) from TARGET.
+Prefers the adjacent same-parent sibling; at the sibling edge, falls back
+to the nearest node at the same depth in that vertical direction."
+  (let* ((sibs (org-mindmap--siblings target roots))
+         (idx (cl-position target sibs))
+         (j (and idx (+ idx dir)))
+         (sib (and j (<= 0 j) (nth j sibs))))
+    (or sib
+        ;; Sibling edge: nearest node further along DIR by row that is at the
+        ;; same depth AND on the same side (so a right branch never jumps to
+        ;; a left one just because it is nearer in raw row order).
+        (let ((depth (org-mindmap-parser-node-depth target))
+              (side (org-mindmap-parser-node-side target))
+              (row (org-mindmap-parser-node-row target))
+              best best-d)
+          (dolist (n (org-mindmap--all-nodes roots) best)
+            (let ((dr (* dir (- (org-mindmap-parser-node-row n) row))))
+              (when (and (= (org-mindmap-parser-node-depth n) depth)
+                         (eq (org-mindmap-parser-node-side n) side)
+                         (> dr 0)
+                         (or (null best-d) (< dr best-d)))
+                (setq best n best-d dr))))))))
+
+(defun org-mindmap-goto-down ()
+  "Move down to the next sibling, or the nearest same-level node below."
+  (interactive)
+  (org-mindmap--navigate
+   (lambda (target roots) (org-mindmap--vertical-move target roots 1))))
+
+(defun org-mindmap-goto-up ()
+  "Move up to the previous sibling, or the nearest same-level node above."
+  (interactive)
+  (org-mindmap--navigate
+   (lambda (target roots) (org-mindmap--vertical-move target roots -1))))
+
+(defun org-mindmap-delete ()
+  "Delete the node at point in a mindmap region; else fall through."
+  (interactive)
+  (if (org-mindmap-parser-region-active-p)
+      (org-mindmap-delete-node)
+    (org-mindmap--fall-through)))
+
 (defvar org-mindmap-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'org-mindmap-return)
@@ -1659,6 +1822,17 @@ elsewhere (e.g. `org-paste-plus') still works."
     ;; mirroring org-paste-plus's C-+/C--; outside a region these fall through.
     (define-key map (kbd "C-+") #'org-mindmap-increase)
     (define-key map (kbd "C--") #'org-mindmap-decrease)
+    ;; Move point between nodes (tree-semantic, not spatial).  These shadow
+    ;; any `C-c <arrow>' binding (e.g. `winner') only *inside* a mindmap
+    ;; region; each falls through to the normal command everywhere else in
+    ;; the buffer (see `org-mindmap--navigate').  Plain `C-c <arrow>' is
+    ;; used, not `C-c C-<arrow>', which macOS grabs for Mission Control.
+    (define-key map (kbd "C-c <left>")  #'org-mindmap-goto-left)
+    (define-key map (kbd "C-c <right>") #'org-mindmap-goto-right)
+    (define-key map (kbd "C-c <up>")    #'org-mindmap-goto-up)
+    (define-key map (kbd "C-c <down>")  #'org-mindmap-goto-down)
+    ;; Delete the node at point (and its descendants).
+    (define-key map (kbd "C-c C-d")     #'org-mindmap-delete)
     map))
 
 (define-minor-mode org-mindmap-mode
@@ -1673,7 +1847,9 @@ elsewhere (e.g. `org-paste-plus') still works."
         (add-hook 'org-metaright-hook #'org-mindmap--metaright nil t)
         (add-hook 'org-tab-first-hook #'org-mindmap--tab nil t)
         (add-hook 'org-metareturn-hook #'org-mindmap--metareturn nil t)
-        (add-hook 'org-ctrl-c-ctrl-c-hook #'org-mindmap--ctrl-c-ctrl-c nil t))
+        (add-hook 'org-ctrl-c-ctrl-c-hook #'org-mindmap--ctrl-c-ctrl-c nil t)
+        (add-hook 'post-self-insert-hook #'org-mindmap--left-justify-after-insert nil t))
+    (remove-hook 'post-self-insert-hook #'org-mindmap--left-justify-after-insert t)
     (remove-hook 'org-metaup-hook #'org-mindmap--metaup t)
     (remove-hook 'org-metadown-hook #'org-mindmap--metadown t)
     (remove-hook 'org-metaleft-hook #'org-mindmap--metaleft t)
