@@ -144,6 +144,30 @@ The node-edit minibuffer then routes paste (whatever key runs =yank=, e.g.
 macOS =Cmd-V=) through it — borrowing the buffer's file name so the image
 is saved to the right =.assets/= folder and inserted as a link.
 
+* Generating maps with AI (=ox-mindmap-ai-fill=)
+=M-x ox-mindmap-ai-fill= (with point inside a =#+begin_src mindmap= block)
+fills the block from a natural-language description via an LLM. On an
+*empty* block it generates a map from scratch; on a *non-empty* block it
+revises/enhances the existing map. It only rewrites the block *body* — it
+never runs =C-c C-c=, so you review the text (and tweak it) before
+exporting the image yourself.
+
+The model never writes the Unicode connector art. It works purely in an
+org indented outline — the same format the engine round-trips via
+=org-mindmap-to-list= / =org-mindmap-list-to-mindmap= — and this layer only
+wraps the engine's existing outline↔tree↔art converters. So AI output goes
+through the exact same rendering path as a hand-typed map.
+
+Both sides of the root, multi-line nodes, and existing images are
+preserved: the outline uses a bare =-= pivot for left-side branches and
+=\\= for in-node line breaks, and image links are shielded from the model
+with opaque tokens (on the enhance path) so it cannot corrupt them.
+
+Requires the [[https://github.com/karthink/gptel][gptel]] package (a soft, optional dependency); configure your
+gptel backend/model as usual. If gptel is not installed, the command tells
+you so and does nothing else. This is the only part of ox-mindmap with an
+external dependency — the map engine itself stays self-contained.
+
 * Installation — self-contained, no dependencies
 ox-mindmap *bundles* the org-mindmap engine (the =org-mindmap*.el= files in
 this repository), so it is fully self-contained: install this one package
