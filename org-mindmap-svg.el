@@ -103,7 +103,7 @@ back to `org-mindmap-color-palette-fn' instead."
   :type 'string
   :group 'org-mindmap-svg)
 
-(defcustom org-mindmap-svg-depth-fade 0.16
+(defcustom org-mindmap-svg-depth-fade 0.26
   "How much each level lightens its parent's branch color (0 disables).
 A branch keeps one hue, but every deeper level is blended this fraction
 further toward white, so a subtree fades from a saturated root to pale
@@ -448,16 +448,51 @@ hold a tall image expand in the SVG without any blank rows in the source."
 ;; SVG emission
 ;;
 
+(defun org-mindmap-svg--frame-box (node props)
+  "Return the visible frame box of NODE as a plist (:bordered :bx :by :bw :bh).
+This is the single source of truth for where a node's rounded rectangle
+sits, so the border draw and the connector endpoints agree pixel-for-pixel
+instead of the connector attaching to the wider reserved grid box."
+  (let* ((g (org-mindmap-svg--node-geometry node props))
+         (x (plist-get g :x)) (y (plist-get g :y))
+         (w (plist-get g :w)) (h (plist-get g :h))
+         (ch org-mindmap-svg-cell-height)
+         (cw org-mindmap-svg-cell-width)
+         (specs (org-mindmap-svg--line-specs
+                 (org-mindmap-svg--node-text-lines node props)))
+         (has-text (cl-some (lambda (s) (eq (plist-get s :kind) 'text)) specs))
+         (has-image (cl-some (lambda (s) (eq (plist-get s :kind) 'image)) specs))
+         (packed (cl-loop for s in specs sum
+                          (pcase (plist-get s :kind)
+                            ('attr 0) ('image (plist-get s :ihpx)) (_ ch))))
+         (top (+ y (max 0.0 (/ (- h packed) 2.0))))
+         (vpad (min (/ org-mindmap-svg-box-vgap 2.0) (/ packed 3.0)))
+         (content-w (cl-loop for s in specs maximize
+                             (pcase (plist-get s :kind)
+                               ('attr 0)
+                               ('image (plist-get s :iwpx))
+                               (_ (* cw (string-width (plist-get s :text)))))))
+         ;; Always keep one cell of padding on each side of the content.  (Do
+         ;; not clamp to the reserved grid width W: a short label reserves only
+         ;; its bare glyph width, so clamping starves the padding and the
+         ;; border cuts into the text.)
+         (rect-w (+ content-w (* 2 cw))))
+    (ignore w)
+    (list :bordered (or has-text has-image)
+          :bx x
+          :by (if has-image (- top cw) (+ top vpad))
+          :bw (if has-image (+ content-w (* 2 cw)) rect-w)
+          :bh (if has-image (+ packed (* 2 cw)) (- packed (* 2 vpad))))))
+
 (defun org-mindmap-svg--node-svg (node props color-table out)
   "Append SVG for NODE (background, text lines and inline images) to OUT.
 COLOR-TABLE maps nodes to their branch colors."
   (let* ((g (org-mindmap-svg--node-geometry node props))
          (x (plist-get g :x)) (y (plist-get g :y))
-         (w (plist-get g :w)) (h (plist-get g :h))
+         (h (plist-get g :h))
          (ch org-mindmap-svg-cell-height)
          (specs (org-mindmap-svg--line-specs
                  (org-mindmap-svg--node-text-lines node props)))
-         (has-text (cl-some (lambda (s) (eq (plist-get s :kind) 'text)) specs))
          (color (or (gethash node color-table) org-mindmap-svg-neutral-color))
          ;; Depth fade lightens the *fill* only; border and text keep the
          ;; branch color so deep nodes stay legible.
@@ -466,8 +501,11 @@ COLOR-TABLE maps nodes to their branch colors."
          (steps (max 0 (- depth paint-depth 1)))
          (fade (min 0.7 (* steps org-mindmap-svg-depth-fade)))
          (faded (org-mindmap-svg--blend color "white" (- 1.0 fade)))
+         ;; Border fades with depth alongside the fill so every level reads a
+         ;; step paler than its parent; capped short of white so deep borders
+         ;; stay visible.  Text keeps the full branch color (below).
          (stroke (org-mindmap-svg--hex
-                  (org-mindmap-svg--blend color "white" (- 1.0 (min 0.3 fade)))))
+                  (org-mindmap-svg--blend color "white" (- 1.0 (min 0.6 fade)))))
          (fill (org-mindmap-svg--blend faded "white" 0.12))
          (text-color (org-mindmap-svg--blend color "black" 0.7))
          (r org-mindmap-svg-node-radius)
@@ -479,8 +517,6 @@ COLOR-TABLE maps nodes to their branch colors."
                           (pcase (plist-get s :kind)
                             ('attr 0) ('image (plist-get s :ihpx)) (_ ch))))
          (top (+ y (max 0.0 (/ (- h packed) 2.0))))
-         (has-image (cl-some (lambda (s) (eq (plist-get s :kind) 'image)) specs))
-         (vpad (min (/ org-mindmap-svg-box-vgap 2.0) (/ packed 3.0)))
          (multiline (cdr specs))
          (cw org-mindmap-svg-cell-width)
          ;; Border width hugs the *visible* content (text/image), not the
@@ -491,21 +527,18 @@ COLOR-TABLE maps nodes to their branch colors."
                                ('attr 0)
                                ('image (plist-get s :iwpx))
                                (_ (* cw (string-width (plist-get s :text)))))))
-         (rect-w (min w (+ content-w (* 2 cw))))
+         (rect-w (+ content-w (* 2 cw)))
          ;; A node is framed when it has text or an image; only a truly empty
          ;; node is left bare.  Framed content is inset one cell on the left
-         ;; (IX), matched by the border box below.
-         (bordered (or has-text has-image))
+         ;; (IX), matched by the border box.  The frame box itself comes from
+         ;; the shared helper so connectors attach to the same edges.
+         (frame (org-mindmap-svg--frame-box node props))
+         (bordered (plist-get frame :bordered))
          (ix (if bordered (+ x cw) x))
-         ;; Border box.  Text nodes: inset by VPAD for a neighbour gap.
-         ;; Image nodes: leave an even one-cell margin on every side (matching
-         ;; the left inset IX = x+cw), and never clamp to the reserved width W
-         ;; -- a scaled image is often wider than the text-grid box, and the
-         ;; frame must sit outside it, not cut through it.
-         (bx x)
-         (by (if has-image (- top cw) (+ top vpad)))
-         (bw (if has-image (+ content-w (* 2 cw)) rect-w))
-         (bh (if has-image (+ packed (* 2 cw)) (- packed (* 2 vpad)))))
+         (bx (plist-get frame :bx))
+         (by (plist-get frame :by))
+         (bw (plist-get frame :bw))
+         (bh (plist-get frame :bh)))
     (with-current-buffer out
       ;; Background box only when the node has real text; a pure image floats
       ;; borderless.  The box hugs the packed content, not the reserved space.
@@ -527,7 +560,10 @@ COLOR-TABLE maps nodes to their branch colors."
                      (let* ((line (plist-get s :text))
                             (rowc (+ cy (* 0.5 ch)))
                             (ty (+ rowc (* 0.35 org-mindmap-svg-font-size)))
-                            (cx (+ x (/ w 2.0))))
+                            ;; Center single-line text on the *visible frame*
+                            ;; (bx..bx+bw), not the wider reserved grid box, so
+                            ;; a short label can't spill past its own border.
+                            (cx (+ bx (/ bw 2.0))))
                        (setq cy (+ cy ch))
                        (cond
                         ;; Org horizontal rule (>=5 dashes): a full-width line.
@@ -569,14 +605,18 @@ COLOR-TABLE maps nodes to inherited colors."
          (cg (org-mindmap-svg--node-geometry child props))
          (color (or (gethash child color-table) org-mindmap-svg-neutral-color))
          (stroke (org-mindmap-svg--hex color))
+         (pf (org-mindmap-svg--frame-box parent props))
+         (cf (org-mindmap-svg--frame-box child props))
          (py (+ (plist-get pg :y) (/ (plist-get pg :h) 2.0)))
          (cy (+ (plist-get cg :y) (/ (plist-get cg :h) 2.0)))
+         ;; Attach to the *visible* frame edge (not the wider reserved grid
+         ;; box) so no gap opens between a node's border and its connectors.
          (px (if (eq side 'left)
-                 (plist-get pg :x)
-               (+ (plist-get pg :x) (plist-get pg :w))))
+                 (plist-get pf :bx)
+               (+ (plist-get pf :bx) (plist-get pf :bw))))
          (cx (if (eq side 'left)
-                 (+ (plist-get cg :x) (plist-get cg :w))
-               (plist-get cg :x)))
+                 (+ (plist-get cf :bx) (plist-get cf :bw))
+               (plist-get cf :bx)))
          (dx (/ (- cx px) 2.0)))
     (with-current-buffer out
       (insert (format "  <path d=\"M %s %s C %s %s %s %s %s %s\" fill=\"none\" stroke=\"%s\" stroke-width=\"%s\"/>\n"
