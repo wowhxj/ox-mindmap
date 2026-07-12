@@ -412,7 +412,11 @@ When KEEP-EMPTY is non-nil, empty text is returned rather than nil."
         (let* ((final-chars (if (> dx 0) (nreverse chars) chars))
                (non-placeholder-chars (if is-vec (cl-remove ?\0 final-chars) final-chars))
                (trimmed (if non-placeholder-chars (string-trim (apply #'string non-placeholder-chars)) ""))
-               (len (string-width trimmed))
+               ;; character count, not display width: `offset' is a char
+               ;; index into the node text.  Using string-width overshot for
+               ;; CJK left-side nodes (offset > length -> minibuffer point
+               ;; past end -> "End of buffer" on edit).
+               (len (length trimmed))
                (leftmost-col (if (> dx 0) start-col (+ curr-col 1))))
           ;; Edge case: cursor before/after the consumed text on this row
           (when (and (or chars keep-empty) point-row point-col (= row point-row) (not offset))
@@ -447,7 +451,12 @@ VISITED marks the consumed cells."
          (curr-col (caddr result))
          (offset (cdddr result))
          (next-col (org-mindmap-parser--consume-spaces lines row curr-col dir visited))
-         (node (when (or keep-empty (not (string= text "")))
+         ;; An empty label is materialized only when the cursor truly sits on
+         ;; it (`offset' non-nil).  `keep-empty' merely says the cursor shares
+         ;; this row -- too coarse: a plain `──' link from the root to its one
+         ;; left child shares the root's row, and materializing it there made a
+         ;; phantom empty parent that swallowed the child (breaking C-c <left>).
+         (node (when (or (not (string= text "")) (and keep-empty offset))
                  (org-mindmap-parser-make-node
                   :text text
                   :parent parent
@@ -495,8 +504,21 @@ VISITED keeps track of visited locations."
                        (new-node (car node-res))
                        (nxt (cdr node-res))
                        (nxt-row (car nxt))
-                       (nxt-col (cdr nxt)))
-                  (if (org-mindmap-parser--snaps lines nxt-row nxt-col possible-dir)
+                       (nxt-col (cdr nxt))
+                       (onward (org-mindmap-parser--snaps lines nxt-row nxt-col possible-dir)))
+                  ;; A materialized *empty* node that still snaps onward is a
+                  ;; spurious intermediate (a plain `──' link), not a leaf: drop
+                  ;; it so the real node beyond attaches to the true parent.
+                  ;; Without this, a cursor on the root's own delimiter kept the
+                  ;; empty link between root and its one left child, and that
+                  ;; phantom swallowed the child (C-c <left> stuck on the root).
+                  (when (and new-node onward
+                             (string= (org-mindmap-parser-node-text new-node) ""))
+                    (when parent
+                      (setf (org-mindmap-parser-node-children parent)
+                            (delq new-node (org-mindmap-parser-node-children parent))))
+                    (setq new-node nil))
+                  (if onward
                       (org-mindmap-parser--go lines nxt-row nxt-col possible-dir (or new-node parent) visited next-side point-row point-col))))
                (t
                 (let ((glued (org-mindmap-parser--glue lines prow pcol possible-dir)))
