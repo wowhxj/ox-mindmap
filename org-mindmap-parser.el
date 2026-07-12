@@ -618,7 +618,17 @@ VISITED tracks consumed cells, POINT-ROW/POINT-COL handle cursor offset."
                   (found-text (and text (not (string= text "")))))
              (when found-text
                (org-mindmap-parser--debug "... '%s'" text)
-               (setf (org-mindmap-parser-node-text node) (concat (org-mindmap-parser-node-text node) " " text))
+               ;; Rejoin a wrapped line.  `string-fill' broke Latin at a space
+               ;; (consuming it) but broke CJK mid-word (consuming nothing), so
+               ;; restore a space unless BOTH sides of the break are wide (CJK)
+               ;; characters -- otherwise "消化后的本"+"地库" would gain a
+               ;; spurious space while "Markdown"+"渲染" correctly regains one.
+               (let* ((prev (org-mindmap-parser-node-text node))
+                      (glue (if (and (> (length prev) 0) (> (length text) 0)
+                                     (>= (char-width (aref prev (1- (length prev)))) 2)
+                                     (>= (char-width (aref text 0)) 2))
+                                "" " ")))
+                 (setf (org-mindmap-parser-node-text node) (concat prev glue text)))
                (when (eq side 'left)
                  (setf (org-mindmap-parser-node-col node) leftmost-col))
                (cl-incf i)
