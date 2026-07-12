@@ -873,14 +873,21 @@ ROOTS are used to determine auto max-width."
       nil)))
 
 (defun org-mindmap--calculate-max-width (roots)
-  "Return optimal max-width for the current window and tree ROOTS."
+  "Return an auto max-width (chars) for the current window and tree ROOTS.
+The horizontal extent is dominated by the DEEPER wing, so the per-node
+budget divides the window by the *max* of the two sides' depths, not their
+sum.  Summing double-counted a shallow opposite wing and starved every node
+of width -- wrapping short labels while the window still had room.  A tree
+that is deep on both sides may now slightly exceed the window (horizontal
+scroll), which is preferable to gratuitous wrapping; set an explicit
+`:max-width' to override."
   (let* ((root (car roots))
          (descendants (org-mindmap--descendants root))
          (sides (seq-group-by #'org-mindmap-parser-node-side descendants))
          (side-depths (mapcar #'(lambda (nodes) (mapcar #'org-mindmap-parser-node-depth nodes))
                               (mapcar #'cdr sides)))
-         (depth (apply #'+ (mapcar #'seq-max side-depths))))
-    (floor (/ (- (window-width) (* 4 (1+ depth))) (1+ depth)))))
+         (depth (if side-depths (apply #'max (mapcar #'seq-max side-depths)) 1)))
+    (max 8 (floor (/ (- (window-width) (* 4 (1+ depth))) (1+ depth))))))
 
 (defun org-mindmap--get-state ()
   "Parse current region, return (start end props roots target-node)."
