@@ -983,6 +983,8 @@ Handles multi-line wrapped nodes, left/right padding, and root delimiters."
 Uses PROPS for rendering."
   (org-mindmap-parser-with-debug-batch
     "Update buffer"
+    ;; Folds are a view over the old text; a redraw invalidates them.
+    (org-mindmap--clear-folds)
     (let ((rendered (org-mindmap-render-tree roots props)))
       ;; Draw the map.
       (save-excursion
@@ -1817,6 +1819,114 @@ to the nearest node at the same depth in that vertical direction."
       (org-mindmap-delete-node)
     (org-mindmap--fall-through)))
 
+;;
+;; Folding (display-only)
+;;
+;; Hide a node's subtree behind invisible overlays and show a small marker on
+;; the node.  This is a *view* operation: the buffer text and the parse are
+;; untouched, so export and alignment ignore folds.  A redraw clears folds
+;; (`org-mindmap--clear-folds' runs in `org-mindmap--update-buffer').
+
+(defface org-mindmap-fold-marker
+  '((t :inherit shadow :weight bold))
+  "Face for the fold indicator shown next to a folded node."
+  :group 'org-mindmap)
+
+(defvar-local org-mindmap--fold-overlays nil
+  "Overlays implementing the current folds in this buffer.")
+
+(defun org-mindmap--row-pos (start row col)
+  "Return the buffer position of grid ROW/COL in the map beginning at START.
+Mirrors how `org-mindmap--goto-node' walks from the block header, so fold
+geometry lands on the same characters the renderer drew."
+  (save-excursion
+    (goto-char start)
+    (forward-line (1+ row))
+    (move-to-column col)
+    (point)))
+
+(defun org-mindmap--fold-row-range (node props)
+  "Return (MIN-ROW . MAX-ROW), the grid rows NODE's whole subtree spans."
+  (let ((min-r most-positive-fixnum) (max-r 0))
+    (dolist (n (org-mindmap--subtree node) (cons min-r max-r))
+      (let* ((r0 (org-mindmap-parser-node-row n))
+             (r1 (+ r0 (1- (cadr (org-mindmap--node-box n props))))))
+        (setq min-r (min min-r r0) max-r (max max-r r1))))))
+
+(defun org-mindmap--clear-folds ()
+  "Remove every fold overlay and marker in this buffer."
+  (mapc #'delete-overlay org-mindmap--fold-overlays)
+  (setq org-mindmap--fold-overlays nil))
+
+(defun org-mindmap--fold-overlays-for (row)
+  "Return this buffer's fold overlays anchored on grid ROW."
+  (cl-remove-if-not (lambda (o) (eql (overlay-get o 'org-mindmap-fold-row) row))
+                    org-mindmap--fold-overlays))
+
+(defun org-mindmap--fold-node (node start props)
+  "Fold NODE's subtree: hide it and add a marker.  Return non-nil on success.
+A right-side subtree lies to the right of the node, a left-side subtree to
+the left, so the hidden span on each of the subtree's rows runs from the
+node's outward edge to the line end (right) or from the line start to the
+node's inward edge (left)."
+  (let* ((side (org-mindmap-parser-node-side node))
+         (right (eq side 'right))
+         (box (org-mindmap--node-box node props))
+         (col (org-mindmap-parser-node-col node))
+         (node-row (org-mindmap-parser-node-row node))
+         (edge (if right (+ col (car box)) col))
+         (range (org-mindmap--fold-row-range node props))
+         (overlays nil))
+    (cl-loop for r from (car range) to (cdr range) do
+             (let* ((bol (org-mindmap--row-pos start r 0))
+                    (eol (save-excursion (goto-char bol) (line-end-position)))
+                    (edge-pos (min eol (org-mindmap--row-pos start r edge)))
+                    (beg (if right edge-pos bol))
+                    (fin (if right eol edge-pos)))
+               (when (< beg fin)
+                 (let ((ov (make-overlay beg fin)))
+                   (overlay-put ov 'invisible t)
+                   (overlay-put ov 'evaporate t)
+                   (overlay-put ov 'org-mindmap-fold-row node-row)
+                   (push ov overlays)))))
+    ;; Marker hugging the node box on its own row.  Kept as a zero-length
+    ;; overlay (evaporate nil) so a blank connector row can't drop it; folds
+    ;; are torn down explicitly on unfold and on redraw.
+    (let* ((anchor (min (save-excursion
+                          (goto-char (org-mindmap--row-pos start node-row 0))
+                          (line-end-position))
+                        (org-mindmap--row-pos start node-row edge)))
+           (mk (make-overlay anchor anchor)))
+      (overlay-put mk (if right 'before-string 'after-string)
+                   (propertize (if right " ▸" "◂ ") 'face 'org-mindmap-fold-marker))
+      (overlay-put mk 'org-mindmap-fold-row node-row)
+      (push mk overlays))
+    (setq org-mindmap--fold-overlays (nconc overlays org-mindmap--fold-overlays))
+    t))
+
+(defun org-mindmap-toggle-fold ()
+  "Fold or unfold the subtree of the node at point (display only).
+Bound to \\`<C-tab>' inside a mindmap block; falls through elsewhere."
+  (interactive)
+  (if (not (org-mindmap-parser-region-active-p))
+      (org-mindmap--fall-through)
+    (cl-destructuring-bind (start _end props _roots node) (org-mindmap--get-state)
+      (cond
+       ((null node) (message "No node at point"))
+       ((null (org-mindmap-parser-node-side node)) (message "Cannot fold the root"))
+       ((null (org-mindmap-parser-node-children node)) (message "Leaf node — nothing to fold"))
+       (t
+        (let ((existing (org-mindmap--fold-overlays-for
+                         (org-mindmap-parser-node-row node))))
+          (if existing
+              (progn
+                (mapc #'delete-overlay existing)
+                (setq org-mindmap--fold-overlays
+                      (cl-set-difference org-mindmap--fold-overlays existing))
+                (message "Unfolded"))
+            (org-mindmap--fold-node node start props)
+            (message "Folded"))))))))
+
 (defvar org-mindmap-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'org-mindmap-return)
@@ -1835,6 +1945,9 @@ to the nearest node at the same depth in that vertical direction."
     (define-key map (kbd "C-c <down>")  #'org-mindmap-goto-down)
     ;; Delete the node at point (and its descendants).
     (define-key map (kbd "C-c C-d")     #'org-mindmap-delete)
+    ;; Fold/unfold the subtree at point (display only).  <C-tab> is delivered
+    ;; in GUI Emacs; a terminal frame usually cannot see it.
+    (define-key map (kbd "<C-tab>")     #'org-mindmap-toggle-fold)
     map))
 
 (define-minor-mode org-mindmap-mode
