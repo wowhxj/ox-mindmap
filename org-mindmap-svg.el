@@ -291,7 +291,9 @@ holding the next palette index."
                   (base64-encode-string (buffer-string) t)))))))
 
 (defun org-mindmap-svg--node-text-lines (node props)
-  "Return clean display lines for NODE (root delimiters stripped) using PROPS."
+  "Return clean display lines for NODE (root delimiters stripped) using PROPS.
+A trailing in-node line-break marker is kept so `org-mindmap-svg--line-specs'
+can tell a hard paragraph break from a soft wrap; it strips the marker."
   (let* ((box (org-mindmap--node-box node props))
          (lines (cddr box))
          (delim-chars (delete-dups
@@ -301,17 +303,10 @@ holding the next palette index."
                                                 (string-to-list (cdr pair))))
                                       org-mindmap-parser-root-delimiters)))))
     (mapcar (lambda (line)
-              (let ((clean (string-trim
-                            (apply #'string
-                                   (cl-remove-if (lambda (c) (memq c delim-chars))
-                                                 (string-to-list line))))))
-                ;; Drop the trailing in-node line-break marker (the split
-                ;; into separate lines already happened at display-lines).
-                (string-trim
-                 (if (string-suffix-p org-mindmap-line-break clean)
-                     (substring clean 0 (- (length clean)
-                                           (length org-mindmap-line-break)))
-                   clean))))
+              (string-trim
+               (apply #'string
+                      (cl-remove-if (lambda (c) (memq c delim-chars))
+                                    (string-to-list line)))))
             lines)))
 
 (defconst org-mindmap-svg--link-re
@@ -403,7 +398,14 @@ contribution) and :hpx (row height in px).  Image specs add :uri and
         (ch org-mindmap-svg-cell-height)
         (pending nil) (specs nil))
     (dolist (line lines (nreverse specs))
-      (let ((path (org-mindmap-svg--image-link line)))
+      ;; A trailing hard-break marker means this line ends a paragraph; strip
+      ;; it and flag the spec so the renderer opens a wider gap after it.
+      (let* ((para-end (string-suffix-p org-mindmap-line-break line))
+             (line (if para-end
+                       (string-trim (substring line 0 (- (length line)
+                                                         (length org-mindmap-line-break))))
+                     line))
+             (path (org-mindmap-svg--image-link line)))
         (cond
          ((org-mindmap-svg--attr-line-p line)
           (when-let* ((w (org-mindmap-svg--line-width-spec line))) (setq pending w))
@@ -424,7 +426,7 @@ contribution) and :hpx (row height in px).  Image specs add :uri and
                         :wpx (max iwpx (* cw (string-width line))))
                   specs)))
          (t
-          (push (list :kind 'text :text line
+          (push (list :kind 'text :text line :para-end para-end
                       :wpx (* cw (string-width line)) :hpx ch)
                 specs)))))))
 
@@ -448,6 +450,26 @@ hold a tall image expand in the SVG without any blank rows in the source."
 ;; SVG emission
 ;;
 
+(defconst org-mindmap-svg--para-gap 0.6
+  "Extra inter-line gap after a hard paragraph break, as a fraction of TLH.
+Soft-wrapped lines of one paragraph stack at the tight line height; a hard
+break (an in-node `\\\\') opens 1 + this fraction of that height, so two
+paragraphs in one node read as separate blocks, not one wrapped run.  At
+0.6 the paragraph step (1.6x) is clearly wider than a soft wrap (1.0x).")
+
+(defun org-mindmap-svg--packed-height (specs tlh)
+  "Return the stacked pixel height of SPECS at text line height TLH.
+Images contribute their own height; text lines contribute TLH, plus a
+`org-mindmap-svg--para-gap' fraction extra when the previous line ended a
+paragraph."
+  (let ((sum 0.0) (prev-para nil))
+    (dolist (s specs sum)
+      (pcase (plist-get s :kind)
+        ('attr nil)
+        ('image (setq sum (+ sum (plist-get s :ihpx)) prev-para nil))
+        (_ (when prev-para (setq sum (+ sum (* org-mindmap-svg--para-gap tlh))))
+           (setq sum (+ sum tlh) prev-para (plist-get s :para-end)))))))
+
 (defun org-mindmap-svg--frame-box (node props)
   "Return the visible frame box of NODE as a plist (:bordered :bx :by :bw :bh).
 This is the single source of truth for where a node's rounded rectangle
@@ -458,15 +480,17 @@ instead of the connector attaching to the wider reserved grid box."
          (w (plist-get g :w)) (h (plist-get g :h))
          (ch org-mindmap-svg-cell-height)
          (cw org-mindmap-svg-cell-width)
+         ;; Wrapped lines of one node advance by a tight line height, not the
+         ;; whole canvas row (24px), so a two-line label reads as one wrapped
+         ;; paragraph instead of two loosely spaced blocks.  The reserved row
+         ;; height stays CH; the slack becomes vertical padding via TOP below.
+         (tlh (min ch (+ org-mindmap-svg-font-size 4)))
          (specs (org-mindmap-svg--line-specs
                  (org-mindmap-svg--node-text-lines node props)))
          (has-text (cl-some (lambda (s) (eq (plist-get s :kind) 'text)) specs))
          (has-image (cl-some (lambda (s) (eq (plist-get s :kind) 'image)) specs))
-         (packed (cl-loop for s in specs sum
-                          (pcase (plist-get s :kind)
-                            ('attr 0) ('image (plist-get s :ihpx)) (_ ch))))
+         (packed (org-mindmap-svg--packed-height specs tlh))
          (top (+ y (max 0.0 (/ (- h packed) 2.0))))
-         (vpad (min (/ org-mindmap-svg-box-vgap 2.0) (/ packed 3.0)))
          (content-w (cl-loop for s in specs maximize
                              (pcase (plist-get s :kind)
                                ('attr 0)
@@ -480,9 +504,11 @@ instead of the connector attaching to the wider reserved grid box."
     (ignore w)
     (list :bordered (or has-text has-image)
           :bx x
-          :by (if has-image (- top cw) (+ top vpad))
+          ;; Text: the frame hugs the packed lines; the inter-box gap comes
+          ;; from TOP centering the (shorter) content in the reserved rows.
+          :by (if has-image (- top cw) top)
           :bw (if has-image (+ content-w (* 2 cw)) rect-w)
-          :bh (if has-image (+ packed (* 2 cw)) (- packed (* 2 vpad))))))
+          :bh (if has-image (+ packed (* 2 cw)) packed))))
 
 (defun org-mindmap-svg--node-svg (node props color-table out)
   "Append SVG for NODE (background, text lines and inline images) to OUT.
@@ -491,6 +517,8 @@ COLOR-TABLE maps nodes to their branch colors."
          (x (plist-get g :x)) (y (plist-get g :y))
          (h (plist-get g :h))
          (ch org-mindmap-svg-cell-height)
+         ;; Tight line height for wrapped lines (see `--frame-box').
+         (tlh (min ch (+ org-mindmap-svg-font-size 4)))
          (specs (org-mindmap-svg--line-specs
                  (org-mindmap-svg--node-text-lines node props)))
          (color (or (gethash node color-table) org-mindmap-svg-neutral-color))
@@ -513,9 +541,7 @@ COLOR-TABLE maps nodes to their branch colors."
          ;; own height, hidden attr = 0) and center that block in the space
          ;; the layout reserved.  This keeps text and image adjacent even when
          ;; the metadata rows between them cannot collapse (shared grid rows).
-         (packed (cl-loop for s in specs sum
-                          (pcase (plist-get s :kind)
-                            ('attr 0) ('image (plist-get s :ihpx)) (_ ch))))
+         (packed (org-mindmap-svg--packed-height specs tlh))
          (top (+ y (max 0.0 (/ (- h packed) 2.0))))
          (multiline (cdr specs))
          (cw org-mindmap-svg-cell-width)
@@ -547,7 +573,7 @@ COLOR-TABLE maps nodes to their branch colors."
       (when bordered
         (insert (format "  <rect x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" rx=\"%s\" ry=\"%s\" fill=\"%s\" stroke=\"none\"/>\n"
                         bx by bw bh r r fill)))
-      (cl-loop with cy = top
+      (cl-loop with cy = top with prev-para = nil
                for s in specs
                do (pcase (plist-get s :kind)
                     ('attr nil)         ; metadata line: hidden, zero height
@@ -555,16 +581,20 @@ COLOR-TABLE maps nodes to their branch colors."
                      (let ((ih (plist-get s :ihpx)))
                        (insert (format "  <image x=\"%s\" y=\"%s\" width=\"%s\" height=\"%s\" preserveAspectRatio=\"xMinYMid meet\" xlink:href=\"%s\"/>\n"
                                        ix cy (plist-get s :iwpx) ih (plist-get s :uri)))
-                       (setq cy (+ cy ih))))
+                       (setq cy (+ cy ih) prev-para nil)))
                     (_
+                     ;; Wider gap when the previous line ended a paragraph
+                     ;; (mirrors `org-mindmap-svg--packed-height').
+                     (when prev-para (setq cy (+ cy (* org-mindmap-svg--para-gap tlh))))
+                     (setq prev-para (plist-get s :para-end))
                      (let* ((line (plist-get s :text))
-                            (rowc (+ cy (* 0.5 ch)))
+                            (rowc (+ cy (* 0.5 tlh)))
                             (ty (+ rowc (* 0.35 org-mindmap-svg-font-size)))
                             ;; Center single-line text on the *visible frame*
                             ;; (bx..bx+bw), not the wider reserved grid box, so
                             ;; a short label can't spill past its own border.
                             (cx (+ bx (/ bw 2.0))))
-                       (setq cy (+ cy ch))
+                       (setq cy (+ cy tlh))
                        (cond
                         ;; Org horizontal rule (>=5 dashes): a full-width line.
                         ((string-match-p "\\`-\\{5,\\}\\'" (string-trim line))
